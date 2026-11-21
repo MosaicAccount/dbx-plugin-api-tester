@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Tester</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <svg class="brand-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+            <rect width="48" height="48" rx="12" fill="#2563EB" />
+            <path d="M17 17l-7 7 7 7" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M31 17l7 7-7 7" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+            <circle cx="24" cy="24" r="3" fill="#FFFFFF" />
+          </svg>
+          <div class="brand-copy">
+            <div class="brand-name" data-i18n="appName">API Tester</div>
+            <div class="brand-tagline" data-i18n="tagline">HTTP &amp; gRPC</div>
+          </div>
+        </div>
+
+        <div class="side-head">
+          <span data-i18n="saved">Saved</span>
+          <button class="icon-btn" id="new-btn" type="button" data-i18n-title="newRequest">+</button>
+        </div>
+        <div class="side-list" id="saved-list"></div>
+
+        <div class="side-head side-head--history">
+          <span data-i18n="history">History</span>
+          <button class="link-btn" id="clear-history" type="button" data-i18n="clear">Clear</button>
+        </div>
+        <div class="side-list side-list--history" id="history-list"></div>
+        <div class="side-foot hint" id="storage-hint"></div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="segmented" id="protocol-tabs" role="tablist">
+            <button class="seg-btn is-active" type="button" data-protocol="http">HTTP</button>
+            <button class="seg-btn" type="button" data-protocol="grpc">gRPC</button>
+          </div>
+          <div class="topbar-title" id="editor-title">Untitled</div>
+          <div class="topbar-actions">
+            <button class="btn btn-ghost btn-sm" id="save-as-btn" type="button" data-i18n="saveAs">Save as</button>
+            <button class="btn btn-secondary btn-sm" id="save-btn" type="button" data-i18n="save">Save</button>
+          </div>
+        </header>
+
+        <section class="editor">
+          <div class="editor-pane" id="http-editor">
+            <div class="request-bar">
+              <div class="select-menu method-menu" id="http-method-menu">
+                <button class="select select-trigger method-select" id="http-method-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="HTTP method">
+                  <span id="http-method-label">GET</span>
+                  <svg class="chevron" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+                <div class="select-popup is-hidden" id="http-method-popup" role="listbox"></div>
+              </div>
+              <input class="input url-input" id="http-url" type="text" spellcheck="false" placeholder="https://api.example.com/users" data-i18n-ph="urlPlaceholder" />
+              <button class="btn btn-primary" id="http-send" type="button" data-i18n="send">Send</button>
+            </div>
+
+            <div class="tabs" id="http-tabs">
+              <button class="tab is-active" type="button" data-http-tab="params" data-i18n="params">Params</button>
+              <button class="tab" type="button" data-http-tab="headers" data-i18n="headers">Headers</button>
+              <button class="tab" type="button" data-http-tab="body" data-i18n="body">Body</button>
+              <button class="tab" type="button" data-http-tab="options" data-i18n="options">Options</button>
+            </div>
+
+            <div class="tab-panel is-active" data-http-panel="params">
+              <div class="kv-editor" id="http-params-editor"></div>
+              <div class="panel-row">
+                <button class="btn btn-ghost btn-sm" type="button" id="add-param" data-i18n="addParam">+ Add parameter</button>
+              </div>
+              <div class="effective-url">
+                <span class="effective-label" data-i18n="effectiveUrl">URL</span>
+                <code id="effective-url"></code>
+              </div>
+            </div>
+
+            <div class="tab-panel" data-http-panel="headers">
+              <div class="kv-editor" id="http-headers-editor"></div>
+              <div class="panel-row">
+                <button class="btn btn-ghost btn-sm" type="button" id="add-header" data-i18n="addHeader">+ Add header</button>
+              </div>
+              <p class="hint" data-i18n="headerHint">Content-Type is added automatically for the selected body type.</p>
+            </div>
+
+            <div class="tab-panel" data-http-panel="body">
+              <div class="panel-row">
+                <div class="segmented segmented--small" id="body-types">
+                  <button class="seg-btn is-active" type="button" data-body="none" data-i18n="none">None</button>
+                  <button class="seg-btn" type="button" data-body="json">JSON</button>
+                  <button class="seg-btn" type="button" data-body="text" data-i18n="text">Text</button>
+                  <button class="seg-btn" type="button" data-body="xml">XML</button>
+                  <button class="seg-btn" type="button" data-body="form" data-i18n="form">Form</button>
+                </div>
+                <span class="grow"></span>
+                <button class="btn btn-ghost btn-sm" type="button" id="format-body" data-i18n="format">Format</button>
+              </div>
+              <div class="code-editor" id="http-body-editor">
+                <pre class="code-highlight" id="http-body-highlight" aria-hidden="true"></pre>
+                <textarea class="code-area" id="http-body-text" spellcheck="false" placeholder="Request body"></textarea>
+              </div>
+              <p class="hint" id="body-hint"></p>
+            </div>
+
+            <div class="tab-panel" data-http-panel="options">
+              <div class="form-grid">
+                <label class="field">
+                  <span data-i18n="timeout">Timeout (ms)</span>
+                  <input class="input" id="http-timeout" type="number" min="1" max="120000" step="1000" />
+                </label>
+                <label class="check">
+                  <input id="http-follow" type="checkbox" />
+                  <span data-i18n="followRedirects">Follow redirects</span>
+                </label>
+                <label class="check">
+                  <input id="http-skip-tls" type="checkbox" />
+                  <span data-i18n="skipTls">Skip TLS verification</span>
+                </label>
+              </div>
+              <p class="hint warn" id="http-tls-hint" data-i18n="tlsHint">Skip TLS verification only for trusted development servers.</p>
+            </div>
+          </div>
+
+          <div class="editor-pane is-hidden" id="grpc-editor">
+            <div class="request-bar">
+              <input class="input url-input" id="grpc-target" type="text" spellcheck="false" placeholder="localhost:50051" data-i18n-ph="targetPlaceholder" />
+              <label class="check check--inline">
+                <input id="grpc-tls" type="checkbox" />
+                <span data-i18n="tls">TLS</span>
+              </label>
+              <button class="btn btn-secondary" id="grpc-discover" type="button" data-i18n="discover">Discover</button>
+              <button class="btn btn-primary" id="grpc-invoke" type="button" data-i18n="invoke">Invoke</button>
+            </div>
+
+            <div class="grpc-selects">
+              <div class="field">
+                <span data-i18n="service">Service</span>
+                <div class="select-menu grpc-select" id="grpc-service-menu">
+                  <button class="select select-trigger" id="grpc-service-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <span id="grpc-service-label"></span>
+                    <svg class="chevron" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  </button>
+                  <div class="select-popup is-hidden" id="grpc-service-popup" role="listbox"></div>
+                </div>
+              </div>
+              <div class="field">
+                <span data-i18n="method">Method</span>
+                <div class="select-menu grpc-select" id="grpc-method-menu">
+                  <button class="select select-trigger" id="grpc-method-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <span id="grpc-method-label"></span>
+                    <svg class="chevron" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  </button>
+                  <div class="select-popup is-hidden" id="grpc-method-popup" role="listbox"></div>
+                </div>
+              </div>
+            </div>
+            <div class="grpc-signature" id="grpc-signature"></div>
+
+            <div class="tabs" id="grpc-tabs">
+              <button class="tab is-active" type="button" data-grpc-tab="metadata" data-i18n="metadata">Metadata</button>
+              <button class="tab" type="button" data-grpc-tab="message" data-i18n="message">Message</button>
+              <button class="tab" type="button" data-grpc-tab="options" data-i18n="options">Options</button>
+            </div>
+
+            <div class="tab-panel is-active" data-grpc-panel="metadata">
+              <div class="kv-editor" id="grpc-metadata-editor"></div>
+              <div class="panel-row">
+                <button class="btn btn-ghost btn-sm" type="button" id="add-metadata" data-i18n="addMetadata">+ Add metadata</button>
+              </div>
+              <p class="hint" data-i18n="metadataHint">Metadata keys are sent as lowercase gRPC headers, for example authorization.</p>
+            </div>
+
+            <div class="tab-panel" data-grpc-panel="message">
+              <div class="panel-row">
+                <span class="hint" data-i18n="messageHint">JSON request body, encoded with the method's protobuf schema.</span>
+                <span class="grow"></span>
+                <button class="btn btn-ghost btn-sm" type="button" id="format-message" data-i18n="format">Format</button>
+              </div>
+              <div class="code-editor" id="grpc-message-editor">
+                <pre class="code-highlight" id="grpc-message-highlight" aria-hidden="true"></pre>
+                <textarea class="code-area" id="grpc-message" spellcheck="false" placeholder="{ }"></textarea>
+              </div>
+            </div>
+
+            <div class="tab-panel" data-grpc-panel="options">
+              <div class="form-grid">
+                <label class="field">
+                  <span data-i18n="timeout">Timeout (ms)</span>
+                  <input class="input" id="grpc-timeout" type="number" min="1" max="120000" step="1000" />
+                </label>
+                <label class="check">
+                  <input id="grpc-skip-tls" type="checkbox" />
+                  <span data-i18n="skipTls">Skip TLS verification</span>
+                </label>
+              </div>
+              <p class="hint" data-i18n="grpcHint">Discovery uses gRPC server reflection; the method request type is resolved dynamically.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="response">
+          <div class="response-head">
+            <span class="response-title" data-i18n="response">Response</span>
+            <span class="response-badges" id="response-badges"></span>
+            <span class="grow"></span>
+            <button class="btn btn-ghost btn-sm" id="copy-response" type="button" data-i18n="copy">Copy</button>
+          </div>
+          <div class="tabs tabs--response" id="response-tabs">
+            <button class="tab is-active" type="button" data-rtab="body" data-i18n="body">Body</button>
+            <button class="tab" type="button" data-rtab="headers" data-i18n="headers">Headers</button>
+          </div>
+          <div class="response-body" id="response-body"></div>
+        </section>
+      </main>
+    </div>
+
+    <div class="modal-backdrop is-hidden" id="modal-backdrop">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <h2 id="modal-title"></h2>
+        <p id="modal-message"></p>
+        <input class="input" id="modal-input" type="text" />
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="modal-cancel" type="button" data-i18n="cancel">Cancel</button>
+          <button class="btn btn-primary" id="modal-confirm" type="button" data-i18n="confirm">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast is-hidden" id="toast"></div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

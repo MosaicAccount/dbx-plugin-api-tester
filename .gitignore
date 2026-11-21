@@ -1,0 +1,7 @@
+/dist/
+/.dbx-dev/
+/.commandcode/
+.dbx-repository-signing-key.env
+.DS_Store
+*.log
+*.dbxp
