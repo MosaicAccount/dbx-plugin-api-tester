@@ -1,0 +1,17 @@
+{
+  "name": "API Tester",
+  "description": "HTTP and gRPC API testing workbench for DBX.",
+  "icon": "assets/plugin.svg",
+  "tags": ["api", "http", "grpc", "testing"],
+  "permissions": ["host.storage"],
+  "source": "https://github.com/MosaicAccount/dbx-plugin-api-tester",
+  "homepage": "https://github.com/MosaicAccount/dbx-plugin-api-tester",
+  "license": "MIT",
+  "releaseNotes": "Initial release.",
+  "localizations": {
+    "zh-CN": {
+      "name": "API 调试台",
+      "description": "在 DBX 工作台里调试 HTTP 接口、调用 gRPC 服务。"
+    }
+  }
+}

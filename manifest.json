@@ -4,7 +4,7 @@
   "id": "com.jlian.apitester",
   "name": "API Tester",
   "version": "0.0.1",
-  "publisher": "jlian",
+  "publisher": "jerrymouse",
   "description": "Test HTTP and gRPC APIs from a DBX workbench.",
   "icon": "assets/plugin.svg",
   "engines": {

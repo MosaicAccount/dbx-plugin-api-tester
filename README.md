@@ -138,3 +138,7 @@ dbx-plugin package .
 `backend/sdk` 是插件 CLI 0.1.10 携带的官方 Go SDK 副本，`backend/go.mod` 通过相对路径 `replace` 使用它。这样做的原因是当前 Go 工作区在同时引入 gRPC/protobuf 依赖后会忽略工作区里对 SDK 模块的本地 `use`，转而去代理拉取并不存在的 `v0.1.0`。升级插件 CLI 时同步替换 `backend/sdk` 下的三个文件即可。
 
 Go module 路径为 `github.com/jlian/dbx-plugin-api-tester`。
+
+## License
+
+MIT
