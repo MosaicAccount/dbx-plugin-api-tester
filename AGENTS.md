@@ -8,7 +8,7 @@
 - 不做无关重构，不添加推测性功能；没有必要时不写注释。
 - 未经用户明确要求，不要执行 git commit、tag 或 push。
 - `backend/sdk/` 是官方 SDK 的固定副本；除非任务就是升级 SDK，否则不要修改。
-- 修改插件身份或版本时，同步 `manifest.json` 与 `backend/main.go`；插件 ID 固定为 `com.jerrymouse.apitester`。
+- 修改插件身份或版本时，同步 `manifest.json` 与 `backend/main.go`；插件 ID 固定为 `com.jlian.apitester`。
 
 ## 插件边界
 

@@ -1,10 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/t8y2/dbx/main/plugins/manifest.schema.json",
   "manifest_version": 1,
-  "id": "com.jerrymouse.apitester",
+  "id": "com.jlian.apitester",
   "name": "API Tester",
   "version": "0.0.1",
-  "publisher": "jerrymouse",
+  "publisher": "jlian",
   "description": "Test HTTP and gRPC APIs from a DBX workbench.",
   "icon": "assets/plugin.svg",
   "engines": {
@@ -24,7 +24,7 @@
   "contributions": [
     {
       "type": "workbench",
-      "id": "com.jerrymouse.apitester.workbench",
+      "id": "com.jlian.apitester.workbench",
       "label": "API Tester",
       "description": "Build HTTP requests and invoke gRPC methods, with saved history.",
       "icon": "assets/plugin.svg"
@@ -35,7 +35,7 @@
       "name": "API 调试台",
       "description": "在 DBX 工作台里调试 HTTP 接口、调用 gRPC 服务。",
       "contributions": {
-        "com.jerrymouse.apitester.workbench": {
+        "com.jlian.apitester.workbench": {
           "label": "API 调试台",
           "description": "构建 HTTP 请求、调用 gRPC 方法，并保存请求历史。"
         }

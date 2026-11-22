@@ -28,7 +28,7 @@
 
 1. 打开 DBX → **插件中心** → **设置**
 2. 展开 **第三方与开发者选项**，打开 **允许安装未签名开发包**
-3. 在 **安装插件包** 区域点击 **安装 .dbxp**，选择 `dist/com.jerrymouse.apitester-*-darwin-arm64.dbxp`（按你的平台选择对应包）
+3. 在 **安装插件包** 区域点击 **安装 .dbxp**，选择 `dist/com.jlian.apitester-*-darwin-arm64.dbxp`（按你的平台选择对应包）
 4. 安装完成后，在 **插件中心 → 已安装 → API Tester → 工作台** 打开
 
 ### 插件中心安装（从 URL）
@@ -107,7 +107,7 @@ node --check ui/app.js
 dbx-plugin package .
 ```
 
-产物是当前平台（本机为 `darwin-arm64`）的未签名候选包 `dist/com.jerrymouse.apitester-0.0.1-darwin-arm64.dbxp` 及其 `.artifact.json`。
+产物是当前平台（本机为 `darwin-arm64`）的未签名候选包 `dist/com.jlian.apitester-0.0.1-darwin-arm64.dbxp` 及其 `.artifact.json`。
 
 ### 多平台打包
 
@@ -137,7 +137,7 @@ dbx-plugin package .
 
 `backend/sdk` 是插件 CLI 0.1.10 携带的官方 Go SDK 副本，`backend/go.mod` 通过相对路径 `replace` 使用它。这样做的原因是当前 Go 工作区在同时引入 gRPC/protobuf 依赖后会忽略工作区里对 SDK 模块的本地 `use`，转而去代理拉取并不存在的 `v0.1.0`。升级插件 CLI 时同步替换 `backend/sdk` 下的三个文件即可。
 
-Go module 路径为 `github.com/MosaicAccount/dbx-plugin-api-tester`。
+Go module 路径为 `github.com/jlian/dbx-plugin-api-tester`。
 
 ## License
 

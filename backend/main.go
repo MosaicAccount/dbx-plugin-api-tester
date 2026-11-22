@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	pluginID      = "com.jerrymouse.apitester"
+	pluginID      = "com.jlian.apitester"
 	pluginVersion = "0.0.1"
 )
 

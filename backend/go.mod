@@ -1,4 +1,4 @@
-module github.com/MosaicAccount/dbx-plugin-api-tester
+module github.com/jlian/dbx-plugin-api-tester
 
 go 1.22
 
