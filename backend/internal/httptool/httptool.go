@@ -1,4 +1,4 @@
-package main
+package httptool
 
 import (
 	"bytes"
@@ -17,7 +17,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	dbxpluginsdk "github.com/t8y2/dbx/plugins/sdk/go/dbx-plugin-sdk"
+	"github.com/jlian/dbx-plugin-api-tester/internal/apperr"
+	"github.com/jlian/dbx-plugin-api-tester/internal/values"
 )
 
 const (
@@ -30,59 +31,63 @@ const (
 	maxRedirectsLimit    = 20
 )
 
-type keyValue struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
+type SendParams struct {
+	Method          string            `json:"method"`
+	URL             string            `json:"url"`
+	Headers         []values.KeyValue `json:"headers"`
+	BodyText        string            `json:"bodyText"`
+	BodyBase64      string            `json:"bodyBase64"`
+	BodyEncoding    string            `json:"bodyEncoding"`
+	TimeoutMs       int               `json:"timeoutMs"`
+	FollowRedirects *bool             `json:"followRedirects"`
+	MaxRedirects    int               `json:"maxRedirects"`
+	SkipTLSVerify   bool              `json:"skipTlsVerify"`
+	MaxBodyBytes    int               `json:"maxBodyBytes"`
 }
 
-type httpSendParams struct {
-	Method          string     `json:"method"`
-	URL             string     `json:"url"`
-	Headers         []keyValue `json:"headers"`
-	BodyText        string     `json:"bodyText"`
-	BodyBase64      string     `json:"bodyBase64"`
-	BodyEncoding    string     `json:"bodyEncoding"`
-	TimeoutMs       int        `json:"timeoutMs"`
-	FollowRedirects *bool      `json:"followRedirects"`
-	MaxRedirects    int        `json:"maxRedirects"`
-	SkipTLSVerify   bool       `json:"skipTlsVerify"`
-	MaxBodyBytes    int        `json:"maxBodyBytes"`
-}
-
-type httpRedirect struct {
+type Redirect struct {
 	Status int    `json:"status"`
 	URL    string `json:"url"`
 }
 
-type httpSendResult struct {
-	Status      int            `json:"status"`
-	StatusText  string         `json:"statusText"`
-	HTTPVersion string         `json:"httpVersion"`
-	URL         string         `json:"url"`
-	Headers     []keyValue     `json:"headers"`
-	BodyKind    string         `json:"bodyKind"`
-	BodyText    string         `json:"bodyText,omitempty"`
-	BodyBase64  string         `json:"bodyBase64,omitempty"`
-	ContentType string         `json:"contentType,omitempty"`
-	SizeBytes   int64          `json:"sizeBytes"`
-	Truncated   bool           `json:"truncated"`
-	ElapsedMs   int64          `json:"elapsedMs"`
-	Redirects   []httpRedirect `json:"redirects"`
-	ReceivedAt  string         `json:"receivedAt"`
+type SendResult struct {
+	Status      int               `json:"status"`
+	StatusText  string            `json:"statusText"`
+	HTTPVersion string            `json:"httpVersion"`
+	URL         string            `json:"url"`
+	Headers     []values.KeyValue `json:"headers"`
+	BodyKind    string            `json:"bodyKind"`
+	BodyText    string            `json:"bodyText,omitempty"`
+	BodyBase64  string            `json:"bodyBase64,omitempty"`
+	ContentType string            `json:"contentType,omitempty"`
+	SizeBytes   int64             `json:"sizeBytes"`
+	Truncated   bool              `json:"truncated"`
+	ElapsedMs   int64             `json:"elapsedMs"`
+	Redirects   []Redirect        `json:"redirects"`
+	ReceivedAt  string            `json:"receivedAt"`
 }
 
-func sendHTTP(params httpSendParams) (*httpSendResult, *dbxpluginsdk.PluginError) {
+// BuildVersion 由 main 注入，避免此包反向依赖插件身份常量。
+var buildVersion = "0.0.0"
+
+// SetVersion 由 main 在启动时调用一次。
+func SetVersion(version string) { buildVersion = version }
+
+func Version() string { return buildVersion }
+
+// Send 发起一次 HTTP 请求。
+func Send(params SendParams) (*SendResult, *apperr.Error) {
 	method := strings.ToUpper(strings.TrimSpace(params.Method))
 	if method == "" {
 		method = http.MethodGet
 	}
 	if !validHTTPMethod(method) {
-		return nil, invalid("Unsupported HTTP method")
+		return nil, apperr.Invalid("Unsupported HTTP method")
 	}
 
 	target, err := parseTargetURL(params.URL)
 	if err != nil {
-		return nil, invalid(err.Error())
+		return nil, apperr.Invalid(err.Error())
 	}
 
 	body, pluginError := requestBody(params)
@@ -90,8 +95,8 @@ func sendHTTP(params httpSendParams) (*httpSendResult, *dbxpluginsdk.PluginError
 		return nil, pluginError
 	}
 
-	timeoutMs := clampInt(params.TimeoutMs, defaultHTTPTimeoutMs, 1, maxHTTPTimeoutMs)
-	maxBody := clampInt(params.MaxBodyBytes, defaultMaxBodyBytes, 1024, maxBodyBytesLimit)
+	timeoutMs := values.ClampInt(params.TimeoutMs, defaultHTTPTimeoutMs, 1, maxHTTPTimeoutMs)
+	maxBody := values.ClampInt(params.MaxBodyBytes, defaultMaxBodyBytes, 1024, maxBodyBytesLimit)
 	followRedirects := true
 	if params.FollowRedirects != nil {
 		followRedirects = *params.FollowRedirects
@@ -119,7 +124,7 @@ func sendHTTP(params httpSendParams) (*httpSendResult, *dbxpluginsdk.PluginError
 		Transport: clonedTransport,
 		Timeout:   time.Duration(timeoutMs) * time.Millisecond,
 	}
-	redirects := make([]httpRedirect, 0, 2)
+	redirects := make([]Redirect, 0, 2)
 	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
 		if !followRedirects {
 			return http.ErrUseLastResponse
@@ -128,7 +133,7 @@ func sendHTTP(params httpSendParams) (*httpSendResult, *dbxpluginsdk.PluginError
 			return fmt.Errorf("stopped after %d redirects", maxRedirects)
 		}
 		if request.Response != nil {
-			redirects = append(redirects, httpRedirect{
+			redirects = append(redirects, Redirect{
 				Status: request.Response.StatusCode,
 				URL:    request.URL.String(),
 			})
@@ -141,7 +146,7 @@ func sendHTTP(params httpSendParams) (*httpSendResult, *dbxpluginsdk.PluginError
 
 	request, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
 	if err != nil {
-		return nil, invalid("Cannot build the request: " + err.Error())
+		return nil, apperr.Invalid("Cannot build the request: " + err.Error())
 	}
 
 	userAgentSet := false
@@ -151,10 +156,10 @@ func sendHTTP(params httpSendParams) (*httpSendResult, *dbxpluginsdk.PluginError
 			continue
 		}
 		if textproto.CanonicalMIMEHeaderKey(name) == "" {
-			return nil, invalid(fmt.Sprintf("Invalid header name %q", name))
+			return nil, apperr.Invalid(fmt.Sprintf("Invalid header name %q", name))
 		}
 		if !validHeaderValue(header.Value) {
-			return nil, invalid(fmt.Sprintf("Header %q contains an invalid value", name))
+			return nil, apperr.Invalid(fmt.Sprintf("Header %q contains an invalid value", name))
 		}
 		if strings.EqualFold(name, "Host") {
 			request.Host = header.Value
@@ -166,7 +171,7 @@ func sendHTTP(params httpSendParams) (*httpSendResult, *dbxpluginsdk.PluginError
 		request.Header.Add(name, header.Value)
 	}
 	if !userAgentSet {
-		request.Header.Set("User-Agent", "DBX-API-Tester/"+pluginVersion)
+		request.Header.Set("User-Agent", "DBX-API-Tester/"+Version())
 	}
 
 	started := time.Now()
@@ -188,7 +193,7 @@ func sendHTTP(params httpSendParams) (*httpSendResult, *dbxpluginsdk.PluginError
 
 	contentType := response.Header.Get("Content-Type")
 	bodyKind := classifyBody(data, contentType)
-	result := &httpSendResult{
+	result := &SendResult{
 		Status:      response.StatusCode,
 		StatusText:  statusText(response),
 		HTTPVersion: response.Proto,
@@ -245,7 +250,7 @@ func parseTargetURL(raw string) (*url.URL, error) {
 	return parsed, nil
 }
 
-func requestBody(params httpSendParams) ([]byte, *dbxpluginsdk.PluginError) {
+func requestBody(params SendParams) ([]byte, *apperr.Error) {
 	var body []byte
 	switch strings.ToLower(strings.TrimSpace(params.BodyEncoding)) {
 	case "", "none":
@@ -258,15 +263,15 @@ func requestBody(params httpSendParams) ([]byte, *dbxpluginsdk.PluginError) {
 		if params.BodyBase64 != "" {
 			decoded, err := base64.StdEncoding.DecodeString(params.BodyBase64)
 			if err != nil {
-				return nil, invalid("Request body is not valid base64")
+				return nil, apperr.Invalid("Request body is not valid base64")
 			}
 			body = decoded
 		}
 	default:
-		return nil, invalid("Unsupported body encoding")
+		return nil, apperr.Invalid("Unsupported body encoding")
 	}
 	if len(body) > maxRequestBodyBytes {
-		return nil, invalid(fmt.Sprintf("Request body is larger than %d bytes", maxRequestBodyBytes))
+		return nil, apperr.Invalid(fmt.Sprintf("Request body is larger than %d bytes", maxRequestBodyBytes))
 	}
 	return body, nil
 }
@@ -296,16 +301,16 @@ func validHeaderValue(value string) bool {
 	return true
 }
 
-func headerEntries(header http.Header) []keyValue {
+func headerEntries(header http.Header) []values.KeyValue {
 	names := make([]string, 0, len(header))
 	for name := range header {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	entries := make([]keyValue, 0, len(names))
+	entries := make([]values.KeyValue, 0, len(names))
 	for _, name := range names {
 		for _, value := range header.Values(name) {
-			entries = append(entries, keyValue{Name: name, Value: value})
+			entries = append(entries, values.KeyValue{Name: name, Value: value})
 		}
 	}
 	return entries
@@ -330,7 +335,7 @@ func classifyBody(data []byte, contentType string) string {
 	return "binary"
 }
 
-func httpTransportError(err error) *dbxpluginsdk.PluginError {
+func httpTransportError(err error) *apperr.Error {
 	kind := "network"
 	message := err.Error()
 
@@ -368,9 +373,5 @@ func httpTransportError(err error) *dbxpluginsdk.PluginError {
 	if strings.TrimSpace(message) == "" {
 		message = "Request failed"
 	}
-	return &dbxpluginsdk.PluginError{
-		Code:    -32000,
-		Message: message,
-		Data:    map[string]any{"kind": kind},
-	}
+	return apperr.Upstream(apperr.Kind(kind), "%s", message)
 }

@@ -1,24 +1,39 @@
+// Command dbx-plugin-apitester 是 API Tester 插件的原生 sidecar。
+//
+// 结构约定（详见 AGENTS.md）：
+//   - 本文件只做装配与进程生命周期，不含业务逻辑。
+//   - 方法分发在 internal/rpc，HTTP 在 internal/httptool，gRPC 在 internal/grpctool。
+//   - 错误码集中在 internal/apperr，不要在别处手写 JSON-RPC 数字字面量。
+//
+// 协议约束：stdout 只输出 JSON-RPC 消息，任何日志都必须走 stderr。
 package main
 
 import (
 	"encoding/json"
 	"log"
 
+	"github.com/jlian/dbx-plugin-api-tester/internal/apperr"
+	"github.com/jlian/dbx-plugin-api-tester/internal/httptool"
+	"github.com/jlian/dbx-plugin-api-tester/internal/rpc"
 	dbxpluginsdk "github.com/t8y2/dbx/plugins/sdk/go/dbx-plugin-sdk"
 )
 
 const (
+	// pluginID 与 pluginVersion 必须与 manifest.json 完全一致。
 	pluginID      = "com.jlian.apitester"
 	pluginVersion = "0.0.1"
 )
 
-type apiTester struct{}
-
-func newAPITester() *apiTester {
-	return &apiTester{}
+// server 把分层后的分发器适配成 SDK 的 Handler 接口。
+type server struct {
+	handler *rpc.Handler
 }
 
-func (plugin *apiTester) Handle(
+// Handle 实现 SDK 的 Handler。
+//
+// 这里做两件边界工作：panic 兜底、错误类型转换。业务代码因此可以放心返回
+// *apperr.Error，不必关心 SDK 的具体结构。
+func (s *server) Handle(
 	_ dbxpluginsdk.RequestContext,
 	method string,
 	params json.RawMessage,
@@ -26,84 +41,43 @@ func (plugin *apiTester) Handle(
 ) (result any, pluginError *dbxpluginsdk.PluginError) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			// panic 细节只写 stderr，不回传给前端，避免泄露内部状态。
 			log.Printf("panic while handling %s: %v", method, recovered)
 			result = nil
-			pluginError = dbxpluginsdk.NewError(-32603, "Internal error while handling the request")
+			pluginError = toPluginError(apperr.Internal("Internal error while handling the request"))
 		}
 	}()
 
-	switch method {
-	case "api/ping":
-		return map[string]any{
-			"ok":      true,
-			"id":      pluginID,
-			"version": pluginVersion,
-			"methods": []string{"http/send", "grpc/services", "grpc/methods", "grpc/invoke"},
-		}, nil
-	case "http/send":
-		var request httpSendParams
-		if err := decodeParams(params, &request); err != nil {
-			return nil, err
-		}
-		return sendHTTP(request)
-	case "grpc/services":
-		var request grpcDiscoveryParams
-		if err := decodeParams(params, &request); err != nil {
-			return nil, err
-		}
-		return discoverGRPCServices(request)
-	case "grpc/methods":
-		var request grpcMethodsParams
-		if err := decodeParams(params, &request); err != nil {
-			return nil, err
-		}
-		return describeGRPCMethods(request)
-	case "grpc/invoke":
-		var request grpcInvokeParams
-		if err := decodeParams(params, &request); err != nil {
-			return nil, err
-		}
-		return invokeGRPC(request)
-	default:
-		return nil, dbxpluginsdk.MethodNotFound(method)
+	value, failure := s.handler.Dispatch(method, params)
+	if failure != nil {
+		return nil, toPluginError(failure)
 	}
+	return value, nil
 }
 
-func decodeParams(raw json.RawMessage, target any) *dbxpluginsdk.PluginError {
-	if len(raw) == 0 || string(raw) == "null" {
+// toPluginError 把分层错误转换成 SDK 错误。
+func toPluginError(err *apperr.Error) *dbxpluginsdk.PluginError {
+	if err == nil {
 		return nil
 	}
-	if err := json.Unmarshal(raw, target); err != nil {
-		return dbxpluginsdk.NewError(-32602, "Invalid request parameters: "+err.Error())
+	return &dbxpluginsdk.PluginError{
+		Code:    int(err.Code),
+		Message: err.Message,
+		Data:    err.Data(),
 	}
-	return nil
-}
-
-func invalid(message string) *dbxpluginsdk.PluginError {
-	return dbxpluginsdk.NewError(-32602, message)
-}
-
-func clampInt(value, fallback, minimum, maximum int) int {
-	if value <= 0 {
-		value = fallback
-	}
-	if value < minimum {
-		return minimum
-	}
-	if value > maximum {
-		return maximum
-	}
-	return value
 }
 
 func main() {
+	httptool.SetVersion(pluginVersion)
+
 	metadata := dbxpluginsdk.Metadata{
 		ID:           pluginID,
 		Version:      pluginVersion,
 		Capabilities: []string{"http", "grpc"},
 	}
-	server := dbxpluginsdk.NewServer(metadata, newAPITester())
-	if err := server.Serve(); err != nil {
+
+	plugin := &server{handler: rpc.New(pluginID, pluginVersion)}
+	if err := dbxpluginsdk.NewServer(metadata, plugin).Serve(); err != nil {
 		log.Fatal(err)
 	}
 }

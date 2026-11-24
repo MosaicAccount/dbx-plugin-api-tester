@@ -1,4 +1,4 @@
-package main
+package grpctool
 
 import (
 	"context"
@@ -14,7 +14,8 @@ import (
 	"strings"
 	"time"
 
-	dbxpluginsdk "github.com/t8y2/dbx/plugins/sdk/go/dbx-plugin-sdk"
+	"github.com/jlian/dbx-plugin-api-tester/internal/apperr"
+	common "github.com/jlian/dbx-plugin-api-tester/internal/values"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -43,37 +44,37 @@ const (
 
 var metadataKeyPattern = regexp.MustCompile(`^[0-9a-z_.-]+$`)
 
-type GRPCTargetParams struct {
-	Target        string     `json:"target"`
-	UseTLS        bool       `json:"tls"`
-	SkipTLSVerify bool       `json:"skipTlsVerify"`
-	TimeoutMs     int        `json:"timeoutMs"`
-	Metadata      []keyValue `json:"metadata"`
+type TargetParams struct {
+	Target        string            `json:"target"`
+	UseTLS        bool              `json:"tls"`
+	SkipTLSVerify bool              `json:"skipTlsVerify"`
+	TimeoutMs     int               `json:"timeoutMs"`
+	Metadata      []common.KeyValue `json:"metadata"`
 }
 
-type grpcDiscoveryParams struct {
-	GRPCTargetParams
+type DiscoveryParams struct {
+	TargetParams
 }
 
-type grpcMethodsParams struct {
-	GRPCTargetParams
+type MethodsParams struct {
+	TargetParams
 	Service string `json:"service"`
 }
 
-type grpcInvokeParams struct {
-	GRPCTargetParams
+type InvokeParams struct {
+	TargetParams
 	Service string          `json:"service"`
 	Method  string          `json:"method"`
 	Message json.RawMessage `json:"message"`
 }
 
-type grpcServicesResult struct {
+type ServicesResult struct {
 	Target    string   `json:"target"`
 	Services  []string `json:"services"`
 	ElapsedMs int64    `json:"elapsedMs"`
 }
 
-type grpcMethodInfo struct {
+type MethodInfo struct {
 	Name            string `json:"name"`
 	FullName        string `json:"fullName"`
 	InputType       string `json:"inputType"`
@@ -82,34 +83,35 @@ type grpcMethodInfo struct {
 	ServerStreaming bool   `json:"serverStreaming"`
 }
 
-type grpcMethodsResult struct {
-	Service   string           `json:"service"`
-	Methods   []grpcMethodInfo `json:"methods"`
-	ElapsedMs int64            `json:"elapsedMs"`
+type MethodsResult struct {
+	Service   string       `json:"service"`
+	Methods   []MethodInfo `json:"methods"`
+	ElapsedMs int64        `json:"elapsedMs"`
 }
 
-type grpcStatusInfo struct {
+type StatusInfo struct {
 	Code    int    `json:"code"`
 	Name    string `json:"name"`
 	Message string `json:"message"`
 }
 
-type grpcInvokeResult struct {
-	OK          bool           `json:"ok"`
-	Method      string         `json:"method"`
-	Status      grpcStatusInfo `json:"status"`
-	MessageJSON string         `json:"messageJson,omitempty"`
-	Messages    []string       `json:"messages,omitempty"`
-	Streaming   bool           `json:"streaming,omitempty"`
-	Truncated   bool           `json:"truncated,omitempty"`
-	Metadata    []keyValue     `json:"metadata"`
-	Trailers    []keyValue     `json:"trailers"`
-	ElapsedMs   int64          `json:"elapsedMs"`
-	SizeBytes   int            `json:"sizeBytes"`
+type InvokeResult struct {
+	OK          bool              `json:"ok"`
+	Method      string            `json:"method"`
+	Status      StatusInfo        `json:"status"`
+	MessageJSON string            `json:"messageJson,omitempty"`
+	Messages    []string          `json:"messages,omitempty"`
+	Streaming   bool              `json:"streaming,omitempty"`
+	Truncated   bool              `json:"truncated,omitempty"`
+	Metadata    []common.KeyValue `json:"metadata"`
+	Trailers    []common.KeyValue `json:"trailers"`
+	ElapsedMs   int64             `json:"elapsedMs"`
+	SizeBytes   int               `json:"sizeBytes"`
 }
 
-func discoverGRPCServices(params grpcDiscoveryParams) (any, *dbxpluginsdk.PluginError) {
-	connection, pluginError := dialGRPC(params.GRPCTargetParams)
+// Discover 列出目标服务端可用的 gRPC 服务。
+func Discover(params DiscoveryParams) (any, *apperr.Error) {
+	connection, pluginError := dialGRPC(params.TargetParams)
 	if pluginError != nil {
 		return nil, pluginError
 	}
@@ -133,20 +135,21 @@ func discoverGRPCServices(params grpcDiscoveryParams) (any, *dbxpluginsdk.Plugin
 		}
 		visible = append(visible, service)
 	}
-	return &grpcServicesResult{
+	return &ServicesResult{
 		Target:    params.Target,
 		Services:  visible,
 		ElapsedMs: time.Since(started).Milliseconds(),
 	}, nil
 }
 
-func describeGRPCMethods(params grpcMethodsParams) (any, *dbxpluginsdk.PluginError) {
+// DescribeMethods 列出某个服务的全部方法签名。
+func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 	serviceName := strings.TrimSpace(params.Service)
 	if serviceName == "" {
-		return nil, invalid("Service name is required")
+		return nil, apperr.Invalid("Service name is required")
 	}
 
-	connection, pluginError := dialGRPC(params.GRPCTargetParams)
+	connection, pluginError := dialGRPC(params.TargetParams)
 	if pluginError != nil {
 		return nil, pluginError
 	}
@@ -165,16 +168,16 @@ func describeGRPCMethods(params grpcMethodsParams) (any, *dbxpluginsdk.PluginErr
 	}
 	descriptor, err := registry.FindDescriptorByName(protoreflect.FullName(serviceName))
 	if err != nil {
-		return nil, invalid("Service not found: " + serviceName)
+		return nil, apperr.Invalid("Service not found: " + serviceName)
 	}
 	service, ok := descriptor.(protoreflect.ServiceDescriptor)
 	if !ok {
-		return nil, invalid(serviceName + " is not a service")
+		return nil, apperr.Invalid(serviceName + " is not a service")
 	}
-	methods := make([]grpcMethodInfo, 0, service.Methods().Len())
+	methods := make([]MethodInfo, 0, service.Methods().Len())
 	for index := 0; index < service.Methods().Len(); index++ {
 		method := service.Methods().Get(index)
-		methods = append(methods, grpcMethodInfo{
+		methods = append(methods, MethodInfo{
 			Name:            string(method.Name()),
 			FullName:        fmt.Sprintf("/%s/%s", service.FullName(), method.Name()),
 			InputType:       string(method.Input().FullName()),
@@ -183,30 +186,31 @@ func describeGRPCMethods(params grpcMethodsParams) (any, *dbxpluginsdk.PluginErr
 			ServerStreaming: method.IsStreamingServer(),
 		})
 	}
-	return &grpcMethodsResult{
+	return &MethodsResult{
 		Service:   serviceName,
 		Methods:   methods,
 		ElapsedMs: time.Since(started).Milliseconds(),
 	}, nil
 }
 
-func invokeGRPC(params grpcInvokeParams) (any, *dbxpluginsdk.PluginError) {
+// Invoke 调用一个 gRPC 方法（支持一元与服务端流）。
+func Invoke(params InvokeParams) (any, *apperr.Error) {
 	serviceName := strings.TrimSpace(params.Service)
 	methodName := strings.TrimSpace(params.Method)
 	if methodName == "" {
-		return nil, invalid("Method name is required")
+		return nil, apperr.Invalid("Method name is required")
 	}
 	if serviceName == "" {
 		full := strings.TrimPrefix(methodName, "/")
 		index := strings.LastIndex(full, "/")
 		if index < 0 {
-			return nil, invalid("Service name is required")
+			return nil, apperr.Invalid("Service name is required")
 		}
 		serviceName = strings.ReplaceAll(full[:index], "/", ".")
 		methodName = full[index+1:]
 	}
 
-	connection, pluginError := dialGRPC(params.GRPCTargetParams)
+	connection, pluginError := dialGRPC(params.TargetParams)
 	if pluginError != nil {
 		return nil, pluginError
 	}
@@ -224,10 +228,10 @@ func invokeGRPC(params grpcInvokeParams) (any, *dbxpluginsdk.PluginError) {
 	}
 	method, err := findMethod(registry, serviceName, methodName)
 	if err != nil {
-		return nil, invalid(err.Error())
+		return nil, apperr.Invalid(err.Error())
 	}
 	if method.IsStreamingClient() {
-		return nil, invalid("Client-streaming and bidirectional gRPC methods are not supported yet")
+		return nil, apperr.Invalid("Client-streaming and bidirectional gRPC methods are not supported yet")
 	}
 
 	requestMessage := dynamicpb.NewMessage(method.Input())
@@ -236,7 +240,7 @@ func invokeGRPC(params grpcInvokeParams) (any, *dbxpluginsdk.PluginError) {
 		messageBytes = []byte("{}")
 	}
 	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(messageBytes, requestMessage); err != nil {
-		return nil, invalid(fmt.Sprintf("Request message does not match %s: %v", method.Input().FullName(), err))
+		return nil, apperr.Invalid(fmt.Sprintf("Request message does not match %s: %v", method.Input().FullName(), err))
 	}
 
 	fullMethod := fmt.Sprintf("/%s/%s", method.Parent().FullName(), method.Name())
@@ -254,7 +258,7 @@ func invokeUnary(
 	fullMethod string,
 	requestMessage proto.Message,
 	started time.Time,
-) (any, *dbxpluginsdk.PluginError) {
+) (any, *apperr.Error) {
 	responseMessage := dynamicpb.NewMessage(method.Output())
 	var header, trailer metadata.MD
 	callOptions := []grpc.CallOption{
@@ -265,10 +269,10 @@ func invokeUnary(
 	}
 	err := connection.Invoke(ctx, fullMethod, requestMessage, responseMessage, callOptions...)
 	elapsed := time.Since(started)
-	result := &grpcInvokeResult{
+	result := &InvokeResult{
 		OK:        err == nil,
 		Method:    fullMethod,
-		Status:    grpcStatusInfoFromError(err),
+		Status:    StatusInfoFromError(err),
 		Metadata:  metadataEntries(header),
 		Trailers:  metadataEntries(trailer),
 		ElapsedMs: elapsed.Milliseconds(),
@@ -278,7 +282,7 @@ func invokeUnary(
 	}
 	encoded, marshalError := marshalProtoJSON(responseMessage)
 	if marshalError != nil {
-		return nil, invalid("Cannot encode the response message: " + marshalError.Error())
+		return nil, apperr.Invalid("Cannot encode the response message: " + marshalError.Error())
 	}
 	result.MessageJSON = string(encoded)
 	result.SizeBytes = len(encoded)
@@ -292,7 +296,7 @@ func invokeServerStream(
 	fullMethod string,
 	requestMessage proto.Message,
 	started time.Time,
-) (any, *dbxpluginsdk.PluginError) {
+) (any, *apperr.Error) {
 	stream, err := connection.NewStream(ctx, &grpc.StreamDesc{
 		StreamName:    string(method.Name()),
 		ServerStreams: true,
@@ -301,20 +305,20 @@ func invokeServerStream(
 		grpc.MaxCallSendMsgSize(maxGRPCMessageBytes),
 	)
 	if err != nil {
-		return &grpcInvokeResult{
+		return &InvokeResult{
 			OK:        false,
 			Method:    fullMethod,
-			Status:    grpcStatusInfoFromError(err),
-			Metadata:  []keyValue{},
-			Trailers:  []keyValue{},
+			Status:    StatusInfoFromError(err),
+			Metadata:  []common.KeyValue{},
+			Trailers:  []common.KeyValue{},
 			ElapsedMs: time.Since(started).Milliseconds(),
 		}, nil
 	}
 	if err := stream.SendMsg(requestMessage); err != nil {
-		return &grpcInvokeResult{OK: false, Method: fullMethod, Status: grpcStatusInfoFromError(err), Metadata: []keyValue{}, Trailers: []keyValue{}, ElapsedMs: time.Since(started).Milliseconds()}, nil
+		return &InvokeResult{OK: false, Method: fullMethod, Status: StatusInfoFromError(err), Metadata: []common.KeyValue{}, Trailers: []common.KeyValue{}, ElapsedMs: time.Since(started).Milliseconds()}, nil
 	}
 	if err := stream.CloseSend(); err != nil {
-		return &grpcInvokeResult{OK: false, Method: fullMethod, Status: grpcStatusInfoFromError(err), Metadata: []keyValue{}, Trailers: []keyValue{}, ElapsedMs: time.Since(started).Milliseconds()}, nil
+		return &InvokeResult{OK: false, Method: fullMethod, Status: StatusInfoFromError(err), Metadata: []common.KeyValue{}, Trailers: []common.KeyValue{}, ElapsedMs: time.Since(started).Milliseconds()}, nil
 	}
 
 	messages := make([]string, 0, 8)
@@ -338,10 +342,10 @@ func invokeServerStream(
 	}
 
 	header, _ := stream.Header()
-	result := &grpcInvokeResult{
+	result := &InvokeResult{
 		OK:        callError == nil,
 		Method:    fullMethod,
-		Status:    grpcStatusInfoFromError(callError),
+		Status:    StatusInfoFromError(callError),
 		Messages:  messages,
 		Streaming: true,
 		Truncated: callError == nil && (len(messages) >= maxStreamMessages || totalBytes >= maxStreamBytes),
@@ -353,10 +357,10 @@ func invokeServerStream(
 	return result, nil
 }
 
-func dialGRPC(params GRPCTargetParams) (*grpc.ClientConn, *dbxpluginsdk.PluginError) {
+func dialGRPC(params TargetParams) (*grpc.ClientConn, *apperr.Error) {
 	target, err := normalizeGRPCTarget(params.Target)
 	if err != nil {
-		return nil, invalid(err.Error())
+		return nil, apperr.Invalid(err.Error())
 	}
 	options := []grpc.DialOption{
 		grpc.WithDefaultCallOptions(
@@ -404,19 +408,19 @@ func normalizeGRPCTarget(raw string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-func grpcContext(timeoutMs int, entries []keyValue) (context.Context, context.CancelFunc, *dbxpluginsdk.PluginError) {
+func grpcContext(timeoutMs int, entries []common.KeyValue) (context.Context, context.CancelFunc, *apperr.Error) {
 	values, err := metadataFromEntries(entries)
 	if err != nil {
-		return nil, nil, invalid(err.Error())
+		return nil, nil, apperr.Invalid(err.Error())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(clampInt(timeoutMs, defaultGRPCTimeoutMs, 1, maxGRPCTimeoutMs))*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(common.ClampInt(timeoutMs, defaultGRPCTimeoutMs, 1, maxGRPCTimeoutMs))*time.Millisecond)
 	if len(values) > 0 {
 		ctx = metadata.NewOutgoingContext(ctx, values)
 	}
 	return ctx, cancel, nil
 }
 
-func metadataFromEntries(entries []keyValue) (metadata.MD, error) {
+func metadataFromEntries(entries []common.KeyValue) (metadata.MD, error) {
 	values := metadata.MD{}
 	for _, entry := range entries {
 		name := strings.ToLower(strings.TrimSpace(entry.Name))
@@ -437,8 +441,8 @@ func metadataFromEntries(entries []keyValue) (metadata.MD, error) {
 	return values, nil
 }
 
-func metadataEntries(values metadata.MD) []keyValue {
-	entries := make([]keyValue, 0, len(values))
+func metadataEntries(values metadata.MD) []common.KeyValue {
+	entries := make([]common.KeyValue, 0, len(values))
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)
@@ -446,7 +450,7 @@ func metadataEntries(values metadata.MD) []keyValue {
 	sort.Strings(keys)
 	for _, key := range keys {
 		for _, value := range values[key] {
-			entries = append(entries, keyValue{Name: key, Value: value})
+			entries = append(entries, common.KeyValue{Name: key, Value: value})
 		}
 	}
 	return entries
@@ -476,22 +480,22 @@ func marshalProtoJSON(message proto.Message) ([]byte, error) {
 	}).Marshal(message)
 }
 
-func grpcStatusInfoFromError(err error) grpcStatusInfo {
+func StatusInfoFromError(err error) StatusInfo {
 	if err == nil {
-		return grpcStatusInfo{Code: 0, Name: "OK"}
+		return StatusInfo{Code: 0, Name: "OK"}
 	}
 	parsed, ok := status.FromError(err)
 	if !ok {
-		return grpcStatusInfo{Code: -1, Name: "ERROR", Message: err.Error()}
+		return StatusInfo{Code: -1, Name: "ERROR", Message: err.Error()}
 	}
-	return grpcStatusInfo{
+	return StatusInfo{
 		Code:    int(parsed.Code()),
 		Name:    parsed.Code().String(),
 		Message: parsed.Message(),
 	}
 }
 
-func grpcReflectionError(err error) *dbxpluginsdk.PluginError {
+func grpcReflectionError(err error) *apperr.Error {
 	kind := "reflection"
 	message := err.Error()
 	if parsed, ok := status.FromError(err); ok {
@@ -512,19 +516,11 @@ func grpcReflectionError(err error) *dbxpluginsdk.PluginError {
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		kind = "timeout"
 	}
-	return &dbxpluginsdk.PluginError{
-		Code:    -32000,
-		Message: "gRPC request failed: " + message,
-		Data:    map[string]any{"kind": kind},
-	}
+	return apperr.Upstream(apperr.Kind(kind), "gRPC request failed: %s", message)
 }
 
-func grpcConnectionError(err error) *dbxpluginsdk.PluginError {
-	return &dbxpluginsdk.PluginError{
-		Code:    -32000,
-		Message: "Cannot create the gRPC client: " + err.Error(),
-		Data:    map[string]any{"kind": "connection"},
-	}
+func grpcConnectionError(err error) *apperr.Error {
+	return apperr.Upstream(apperr.KindConnection, "Cannot create the gRPC client: %s", err.Error())
 }
 
 func withReflectionFallback[T any](
