@@ -128,3 +128,29 @@ dbx-plugin package .
 - 不提交 `dist/`、`.dbx-dev/`、`node_modules/`、`ui/`（构建产物）、`*.dbxp`、日志或密钥。
 - 不 force-push 共享分支，不重写已发布历史。
 - PR 说明写清楚：改了什么、用户可见影响、如何验证。
+
+## 发版与商店
+
+- **版本号四处同步**：`manifest.json`、`backend/main.go` 的 `pluginVersion`、`package.json`、
+  `package-lock.json`（lock 内两处），README 里的产物名示例一并改。`rpc_test.go` 里的版本是
+  测试夹具，不跟随。
+- **顺序**：版本提交经 PR 合入 `main` → 打 annotated tag `vX.Y.Z` → `gh release create`
+  （标题 `API Tester vX.Y.Z`，说明用中文写「变化 / 安装 / 校验」）。`plugin-release.yml` 监听
+  `release: published`，五个平台各自构建（`darwin-arm64`、`darwin-x64`、`linux-x64`、
+  `linux-arm64`、`windows-x64`）；本机不要 `--target` 交叉打包。
+- **Release 资产**：复用 workflow 只上传 `.dbxp` 与 `release-candidates.json`。规范要求的每包
+  `.artifact.json` 需要按已核对的 `sha256`/`size` 补传，或向上游 `t8y2/dbx` 提 workflow 补丁。
+- **`.dbx-store.json` 每版都要改**：商店同步按 Release 的 **tag** 读取该文件，`releaseNotes`
+  不会自动跟版本走，`source` 应指向当期 tag。`releaseNotes` 只能写英文基线——`localizations`
+  只接受 `name` / `description`，写别的字段会被 `validate.mjs` 拒绝。
+- **商店目录在 `t8y2/dbx-store`**：候选文件是 `candidates/<plugin-id>.json`，首次上架还要
+  `publishers/<publisher-id>.json`；登记在 `automation/plugin-sources.json` 里
+  `autoUpdate: true` 的仓库由每小时同步自动开候选 PR，首次或改展示字段才手工提。
+- **签名边界**：不填 `signingKeyId`、不自建密钥、不写 `verified: true`。未签名包只是审核输入；
+  签名由维护者对候选 PR 跑 `/sign`，之后 `candidates/` 被删除，`plugins/`、`catalog/` 由工作流
+  生成，禁止手改。
+- **已发布的东西不要动**：签名制品与 Release 资产不可覆盖，改内容必须递增版本。tag 一旦被签名
+  或被同步消费就不能移动；只有尚未被消费、且只改不进包的文件（如 `.dbx-store.json`）时，经用户
+  确认后才可移动 tag，包字节必须保持不变。
+- **PR 文案**：标题保留英文 Conventional 前缀，正文一律中文（含跨仓库 PR，如 `dbx-store`），
+  写清「改了什么 / 用户可见影响 / 如何验证」。
