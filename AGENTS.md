@@ -151,6 +151,7 @@ dbx-plugin package .
   生成，禁止手改。
 - **已发布的东西不要动**：签名制品与 Release 资产不可覆盖，改内容必须递增版本。tag 一旦被签名
   或被同步消费就不能移动；只有尚未被消费、且只改不进包的文件（如 `.dbx-store.json`）时，经用户
-  确认后才可移动 tag，包字节必须保持不变。
+  确认后才可移动 tag，包字节必须保持不变。移动后 `raw.githubusercontent.com` 有约 5 分钟缓存，
+  验证元数据要用 `gh api repos/<owner>/<repo>/contents/...?ref=<tag>` 或等缓存过期。
 - **PR 文案**：标题保留英文 Conventional 前缀，正文一律中文（含跨仓库 PR，如 `dbx-store`），
   写清「改了什么 / 用户可见影响 / 如何验证」。
