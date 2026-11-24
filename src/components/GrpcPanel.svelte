@@ -9,11 +9,27 @@
   import KVEditor from "./KVEditor.svelte";
   import CodeEditor from "./CodeEditor.svelte";
   import { GRPC_TIMEOUT_DEFAULT, TIMEOUT_MAX, blankKV, clampNumber } from "../lib/model.js";
-  import { discoverGrpc, invokeGrpc, loadGrpcMethods, patchGrpc, setGrpcMethod, setGrpcService, showToast } from "../lib/store.js";
+  import {
+    addGrpcMessage,
+    discoverGrpc,
+    formatGrpcMessage,
+    invokeGrpc,
+    loadGrpcMethods,
+    patchGrpc,
+    removeGrpcMessage,
+    setGrpcMessage,
+    setGrpcMethod,
+    setGrpcService,
+  } from "../lib/store.js";
 
   let { t, grpc, sending = false, discovering = false } = $props();
 
   let tab = $state("metadata");
+
+  const methodInfo = $derived(grpc.methods.find((method) => method.name === grpc.method) || null);
+  /** 客户端流与双向流可以填多条消息；一元与服务端流协议上只接受一条。 */
+  const multiMessage = $derived(Boolean(methodInfo?.clientStreaming));
+  const visibleMessages = $derived(multiMessage ? grpc.messages : grpc.messages.slice(0, 1));
 
   const serviceItems = $derived.by(() => {
     const services = [...grpc.services];
@@ -34,7 +50,9 @@
     const info = grpc.methods.find((method) => method.name === grpc.method);
     if (!info) return grpc.service ? `${grpc.service}/${grpc.method}` : grpc.method;
     const kind = info.clientStreaming
-      ? t("clientStreaming")
+      ? info.serverStreaming
+        ? t("bidiStreaming")
+        : t("clientStreaming")
       : info.serverStreaming
         ? t("serverStreaming")
         : t("unary");
@@ -52,15 +70,6 @@
     patchGrpc({ tls: checked, ...(checked ? {} : { skipTlsVerify: false }) });
   }
 
-  function formatMessage() {
-    const raw = grpc.message;
-    if (!raw.trim()) return;
-    try {
-      patchGrpc({ message: JSON.stringify(JSON.parse(raw), null, 2) });
-    } catch {
-      showToast(t("invalidJson"), "error");
-    }
-  }
 </script>
 
 <div class="editor-pane">
@@ -141,18 +150,37 @@
     </div>
   {:else if tab === "message"}
     <div class="tab-panel is-active">
-      <div class="panel-row">
-        <span class="hint">{t("messageHint")}</span>
-        <span class="grow"></span>
-        <button class="btn btn-ghost btn-sm" type="button" onclick={formatMessage}>{t("format")}</button>
-      </div>
-      <CodeEditor
-        value={grpc.message}
-        placeholder={"{ }"}
-        ariaLabel={t("message")}
-        json
-        onchange={(value) => patchGrpc({ message: value })}
-      />
+      <p class="hint">{multiMessage ? t("clientStreamHint") : t("messageHint")}</p>
+      {#each visibleMessages as message, index (index)}
+        <div class="message-block">
+          <div class="panel-row">
+            {#if multiMessage}
+              <span class="hint">{t("messageIndex", { index: index + 1 })}</span>
+            {/if}
+            <span class="grow"></span>
+            {#if multiMessage && grpc.messages.length > 1}
+              <button class="btn btn-ghost btn-sm" type="button" onclick={() => removeGrpcMessage(index)}>
+                {t("removeMessage")}
+              </button>
+            {/if}
+            <button class="btn btn-ghost btn-sm" type="button" onclick={() => formatGrpcMessage(index)}>
+              {t("format")}
+            </button>
+          </div>
+          <CodeEditor
+            value={message}
+            placeholder={"{ }"}
+            ariaLabel={multiMessage ? t("messageIndex", { index: index + 1 }) : t("message")}
+            json
+            onchange={(value) => setGrpcMessage(index, value)}
+          />
+        </div>
+      {/each}
+      {#if multiMessage}
+        <div class="panel-row">
+          <button class="btn btn-ghost btn-sm" type="button" onclick={() => addGrpcMessage()}>{t("addMessage")}</button>
+        </div>
+      {/if}
     </div>
   {:else}
     <div class="tab-panel is-active">
@@ -188,5 +216,11 @@
 <style>
   .grow {
     flex: 1;
+  }
+
+  .message-block + .message-block {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--color-border);
   }
 </style>

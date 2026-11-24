@@ -40,6 +40,7 @@ const (
 	maxReflectionFiles   = 256
 	maxStreamMessages    = 100
 	maxStreamBytes       = 4 * 1024 * 1024
+	maxOutboundMessages  = 100
 )
 
 var metadataKeyPattern = regexp.MustCompile(`^[0-9a-z_.-]+$`)
@@ -63,9 +64,12 @@ type MethodsParams struct {
 
 type InvokeParams struct {
 	TargetParams
-	Service string          `json:"service"`
-	Method  string          `json:"method"`
+	Service string `json:"service"`
+	Method  string `json:"method"`
+	// Message 是一元与服务端流唯一的请求消息。
 	Message json.RawMessage `json:"message"`
+	// Messages 是客户端流与双向流的出站消息序列；非空时优先于 Message。
+	Messages []json.RawMessage `json:"messages"`
 }
 
 type ServicesResult struct {
@@ -96,17 +100,19 @@ type StatusInfo struct {
 }
 
 type InvokeResult struct {
-	OK          bool              `json:"ok"`
-	Method      string            `json:"method"`
-	Status      StatusInfo        `json:"status"`
-	MessageJSON string            `json:"messageJson,omitempty"`
-	Messages    []string          `json:"messages,omitempty"`
-	Streaming   bool              `json:"streaming,omitempty"`
-	Truncated   bool              `json:"truncated,omitempty"`
-	Metadata    []common.KeyValue `json:"metadata"`
-	Trailers    []common.KeyValue `json:"trailers"`
-	ElapsedMs   int64             `json:"elapsedMs"`
-	SizeBytes   int               `json:"sizeBytes"`
+	OK          bool       `json:"ok"`
+	Method      string     `json:"method"`
+	Status      StatusInfo `json:"status"`
+	MessageJSON string     `json:"messageJson,omitempty"`
+	Messages    []string   `json:"messages,omitempty"`
+	Streaming   bool       `json:"streaming,omitempty"`
+	// StreamKind 取 client / server / bidi，让界面能显示准确的流类型。
+	StreamKind string            `json:"streamKind,omitempty"`
+	Truncated  bool              `json:"truncated,omitempty"`
+	Metadata   []common.KeyValue `json:"metadata"`
+	Trailers   []common.KeyValue `json:"trailers"`
+	ElapsedMs  int64             `json:"elapsedMs"`
+	SizeBytes  int               `json:"sizeBytes"`
 }
 
 // Discover 列出目标服务端可用的 gRPC 服务。
@@ -193,7 +199,7 @@ func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 	}, nil
 }
 
-// Invoke 调用一个 gRPC 方法（支持一元与服务端流）。
+// Invoke 调用一个 gRPC 方法（一元、服务端流、客户端流与双向流）。
 func Invoke(params InvokeParams) (any, *apperr.Error) {
 	serviceName := strings.TrimSpace(params.Service)
 	methodName := strings.TrimSpace(params.Method)
@@ -230,25 +236,49 @@ func Invoke(params InvokeParams) (any, *apperr.Error) {
 	if err != nil {
 		return nil, apperr.Invalid(err.Error())
 	}
-	if method.IsStreamingClient() {
-		return nil, apperr.Invalid("Client-streaming and bidirectional gRPC methods are not supported yet")
+
+	payloads := outboundPayloads(params)
+	if len(payloads) > maxOutboundMessages {
+		return nil, apperr.Invalid(fmt.Sprintf("Too many request messages (limit %d)", maxOutboundMessages))
+	}
+	// 一元与服务端流在协议上只能带一条请求消息，多给出来的是调用方的错误，
+	// 与其静默丢弃，不如在边界上直接拒绝。
+	if !method.IsStreamingClient() && len(payloads) != 1 {
+		return nil, apperr.Invalid("This method accepts exactly one request message")
 	}
 
-	requestMessage := dynamicpb.NewMessage(method.Input())
-	messageBytes := params.Message
-	if len(strings.TrimSpace(string(messageBytes))) == 0 {
-		messageBytes = []byte("{}")
-	}
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(messageBytes, requestMessage); err != nil {
-		return nil, apperr.Invalid(fmt.Sprintf("Request message does not match %s: %v", method.Input().FullName(), err))
+	outbound := make([]proto.Message, 0, len(payloads))
+	for index, payload := range payloads {
+		requestMessage := dynamicpb.NewMessage(method.Input())
+		if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(payload, requestMessage); err != nil {
+			if len(payloads) == 1 {
+				return nil, apperr.Invalid(fmt.Sprintf("Request message does not match %s: %v", method.Input().FullName(), err))
+			}
+			return nil, apperr.Invalid(fmt.Sprintf("Request message #%d does not match %s: %v", index+1, method.Input().FullName(), err))
+		}
+		outbound = append(outbound, requestMessage)
 	}
 
 	fullMethod := fmt.Sprintf("/%s/%s", method.Parent().FullName(), method.Name())
 	started := time.Now()
-	if method.IsStreamingServer() {
-		return invokeServerStream(ctx, connection, method, fullMethod, requestMessage, started)
+	if method.IsStreamingServer() || method.IsStreamingClient() {
+		return invokeStream(ctx, connection, method, fullMethod, outbound, started)
 	}
-	return invokeUnary(ctx, connection, method, fullMethod, requestMessage, started)
+	return invokeUnary(ctx, connection, method, fullMethod, outbound[0], started)
+}
+
+// outboundPayloads 决定这次调用要发哪些消息。
+//
+// 客户端流与双向流用 messages 数组；一元与服务端流沿用单条 message。
+// 两者都没给时退回空对象，保证永远至少有一条可发的消息。
+func outboundPayloads(params InvokeParams) []json.RawMessage {
+	if len(params.Messages) > 0 {
+		return params.Messages
+	}
+	if len(strings.TrimSpace(string(params.Message))) > 0 {
+		return []json.RawMessage{params.Message}
+	}
+	return []json.RawMessage{json.RawMessage("{}")}
 }
 
 func invokeUnary(
@@ -289,72 +319,135 @@ func invokeUnary(
 	return result, nil
 }
 
-func invokeServerStream(
+// invokeStream 执行客户端流、服务端流与双向流。
+//
+// 收与发跑在两条执行线上：发送可能因为对端不读而阻塞，如果接收排在它后面，
+// 两边的缓冲会互相等死——对端等我们读，我们等对端读。并发接收保证我们一直在
+// "掏自己的口袋"，对端永远塞得进来，这也是双向流大载荷不会卡住的原因。
+func invokeStream(
 	ctx context.Context,
 	connection *grpc.ClientConn,
 	method protoreflect.MethodDescriptor,
 	fullMethod string,
-	requestMessage proto.Message,
+	outbound []proto.Message,
 	started time.Time,
 ) (any, *apperr.Error) {
-	stream, err := connection.NewStream(ctx, &grpc.StreamDesc{
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	stream, err := connection.NewStream(streamCtx, &grpc.StreamDesc{
 		StreamName:    string(method.Name()),
-		ServerStreams: true,
+		ClientStreams: method.IsStreamingClient(),
+		ServerStreams: method.IsStreamingServer(),
 	}, fullMethod,
 		grpc.MaxCallRecvMsgSize(maxGRPCMessageBytes),
 		grpc.MaxCallSendMsgSize(maxGRPCMessageBytes),
 	)
 	if err != nil {
-		return &InvokeResult{
-			OK:        false,
-			Method:    fullMethod,
-			Status:    StatusInfoFromError(err),
-			Metadata:  []common.KeyValue{},
-			Trailers:  []common.KeyValue{},
-			ElapsedMs: time.Since(started).Milliseconds(),
-		}, nil
-	}
-	if err := stream.SendMsg(requestMessage); err != nil {
-		return &InvokeResult{OK: false, Method: fullMethod, Status: StatusInfoFromError(err), Metadata: []common.KeyValue{}, Trailers: []common.KeyValue{}, ElapsedMs: time.Since(started).Milliseconds()}, nil
-	}
-	if err := stream.CloseSend(); err != nil {
-		return &InvokeResult{OK: false, Method: fullMethod, Status: StatusInfoFromError(err), Metadata: []common.KeyValue{}, Trailers: []common.KeyValue{}, ElapsedMs: time.Since(started).Milliseconds()}, nil
+		return failedStreamResult(fullMethod, err, started), nil
 	}
 
-	messages := make([]string, 0, 8)
-	totalBytes := 0
-	var callError error
-	for len(messages) < maxStreamMessages && totalBytes < maxStreamBytes {
-		responseMessage := dynamicpb.NewMessage(method.Output())
-		if receiveError := stream.RecvMsg(responseMessage); receiveError != nil {
-			if !errors.Is(receiveError, io.EOF) {
-				callError = receiveError
-			}
+	received := make(chan streamOutcome, 1)
+	go func() { received <- receiveStream(stream, method, cancel) }()
+
+	var sendError error
+	for _, message := range outbound {
+		if err := stream.SendMsg(message); err != nil {
+			sendError = err
+			cancel()
 			break
 		}
-		encoded, marshalError := marshalProtoJSON(responseMessage)
-		if marshalError != nil {
-			callError = marshalError
-			break
+	}
+	if sendError == nil {
+		if err := stream.CloseSend(); err != nil {
+			sendError = err
+			cancel()
 		}
-		messages = append(messages, string(encoded))
-		totalBytes += len(encoded)
+	}
+
+	outcome := <-received
+	callError := outcome.err
+	if sendError != nil {
+		// 服务端明确给了状态时以它为准（Canceled/Unavailable 通常是我们取消的副产物），
+		// 否则发送侧的失败更能说明问题。
+		code := status.Code(callError)
+		if callError == nil || code == codes.Canceled || code == codes.Unavailable {
+			callError = sendError
+		}
 	}
 
 	header, _ := stream.Header()
-	result := &InvokeResult{
-		OK:        callError == nil,
-		Method:    fullMethod,
-		Status:    StatusInfoFromError(callError),
-		Messages:  messages,
-		Streaming: true,
-		Truncated: callError == nil && (len(messages) >= maxStreamMessages || totalBytes >= maxStreamBytes),
-		Metadata:  metadataEntries(header),
-		Trailers:  metadataEntries(stream.Trailer()),
-		ElapsedMs: time.Since(started).Milliseconds(),
-		SizeBytes: totalBytes,
+	return &InvokeResult{
+		OK:         callError == nil,
+		Method:     fullMethod,
+		Status:     StatusInfoFromError(callError),
+		Messages:   outcome.messages,
+		Streaming:  true,
+		StreamKind: streamKind(method),
+		Truncated:  outcome.truncated,
+		Metadata:   metadataEntries(header),
+		Trailers:   metadataEntries(stream.Trailer()),
+		ElapsedMs:  time.Since(started).Milliseconds(),
+		SizeBytes:  outcome.sizeBytes,
+	}, nil
+}
+
+type streamOutcome struct {
+	messages  []string
+	sizeBytes int
+	truncated bool
+	err       error
+}
+
+// receiveStream 一直读到流结束或达到展示上限。
+//
+// 达到上限时必须取消整个流：我们不再读了，对端就会卡在发送上，
+// 取消是唯一能让它退出的方式。
+func receiveStream(stream grpc.ClientStream, method protoreflect.MethodDescriptor, cancel context.CancelFunc) streamOutcome {
+	outcome := streamOutcome{messages: make([]string, 0, 8)}
+	for {
+		responseMessage := dynamicpb.NewMessage(method.Output())
+		if receiveError := stream.RecvMsg(responseMessage); receiveError != nil {
+			if !errors.Is(receiveError, io.EOF) {
+				outcome.err = receiveError
+			}
+			return outcome
+		}
+		encoded, marshalError := marshalProtoJSON(responseMessage)
+		if marshalError != nil {
+			outcome.err = marshalError
+			return outcome
+		}
+		outcome.messages = append(outcome.messages, string(encoded))
+		outcome.sizeBytes += len(encoded)
+		if len(outcome.messages) >= maxStreamMessages || outcome.sizeBytes >= maxStreamBytes {
+			outcome.truncated = true
+			cancel()
+			return outcome
+		}
 	}
-	return result, nil
+}
+
+func failedStreamResult(fullMethod string, err error, started time.Time) *InvokeResult {
+	return &InvokeResult{
+		OK:        false,
+		Method:    fullMethod,
+		Status:    StatusInfoFromError(err),
+		Metadata:  []common.KeyValue{},
+		Trailers:  []common.KeyValue{},
+		ElapsedMs: time.Since(started).Milliseconds(),
+	}
+}
+
+// streamKind 把描述符上的两个布尔值翻成界面用的流类型。
+func streamKind(method protoreflect.MethodDescriptor) string {
+	if method.IsStreamingClient() && method.IsStreamingServer() {
+		return "bidi"
+	}
+	if method.IsStreamingClient() {
+		return "client"
+	}
+	return "server"
 }
 
 func dialGRPC(params TargetParams) (*grpc.ClientConn, *apperr.Error) {

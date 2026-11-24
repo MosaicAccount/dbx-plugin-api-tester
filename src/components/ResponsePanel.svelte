@@ -48,7 +48,16 @@
     if (response?.protocol !== "grpc" || !data) return [];
     const status = data.status || { name: data.ok ? "OK" : "ERROR", code: data.ok ? 0 : -1 };
     const badges = [{ text: status.name || "OK", tone: data.ok ? "ok" : "err" }];
-    if (data.streaming) badges.push({ text: t("serverStreaming"), tone: "info" });
+    if (data.streaming) {
+      // 旧响应没有 streamKind，按服务端流显示，避免回看历史时徽标消失。
+      const label =
+        data.streamKind === "client"
+          ? t("clientStreaming")
+          : data.streamKind === "bidi"
+            ? t("bidiStreaming")
+            : t("serverStreaming");
+      badges.push({ text: label, tone: "info" });
+    }
     if (data.truncated) badges.push({ text: t("truncatedBadge"), tone: "warn" });
     return badges;
   });

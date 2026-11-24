@@ -304,6 +304,37 @@ export function setGrpcMethod(method) {
   scheduleDraftPersist();
 }
 
+export function setGrpcMessage(index, value) {
+  update((s) => ({
+    ...s,
+    grpc: { ...s.grpc, messages: s.grpc.messages.map((item, i) => (i === index ? value : item)) },
+  }));
+  scheduleDraftPersist();
+}
+
+export function addGrpcMessage() {
+  update((s) => ({ ...s, grpc: { ...s.grpc, messages: [...s.grpc.messages, "{\n  \n}"] } }));
+  scheduleDraftPersist();
+}
+
+export function removeGrpcMessage(index) {
+  update((s) => {
+    const rows = s.grpc.messages.filter((_, i) => i !== index);
+    return { ...s, grpc: { ...s.grpc, messages: rows.length ? rows : ["{\n  \n}"] } };
+  });
+  scheduleDraftPersist();
+}
+
+export function formatGrpcMessage(index) {
+  const raw = current().grpc.messages[index];
+  if (!raw || !raw.trim()) return;
+  try {
+    setGrpcMessage(index, JSON.stringify(JSON.parse(raw), null, 2));
+  } catch {
+    showToast(t("invalidJsonMessage", { index: index + 1 }), "error");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 新建 / 保存 / 打开 / 删除
 // ---------------------------------------------------------------------------
@@ -789,17 +820,27 @@ export async function invokeGrpc() {
     return false;
   }
 
-  let message = {};
-  const raw = s.grpc.message.trim();
-  if (raw) {
+  // 只有客户端流（双向流也带这个标记）会把多条消息全部发出去；
+  // 一元与服务端流在协议上只接受一条，这里取第一条，和后端校验保持一致。
+  const methodInfo = s.grpc.methods.find((item) => item.name === s.grpc.method);
+  const authored = Array.isArray(s.grpc.messages) ? s.grpc.messages : [s.grpc.message || ""];
+  const outgoing = methodInfo?.clientStreaming ? authored : authored.slice(0, 1);
+
+  const messages = [];
+  for (const [index, text] of outgoing.entries()) {
+    const raw = String(text || "").trim();
+    if (!raw) {
+      messages.push({});
+      continue;
+    }
     try {
-      message = JSON.parse(raw);
+      messages.push(JSON.parse(raw));
     } catch {
-      showToast(t("invalidJson"), "error");
+      showToast(t("invalidJsonMessage", { index: index + 1 }), "error");
       return false;
     }
   }
-  if (byteLength(JSON.stringify(message)) > BRIDGE_BODY_LIMIT) {
+  if (byteLength(JSON.stringify(messages)) > BRIDGE_BODY_LIMIT) {
     showToast(t("bodyTooLarge"), "error");
     return false;
   }
@@ -810,7 +851,7 @@ export async function invokeGrpc() {
   try {
     const data = await host.invoke(
       "grpc/invoke",
-      { ...base, service: s.grpc.service, method: s.grpc.method, message },
+      { ...base, service: s.grpc.service, method: s.grpc.method, messages },
       { timeoutMs: Math.min(118000, base.timeoutMs + 5000) },
     );
     endRequest({ protocol: "grpc", kind: "done", data, elapsedMs: Math.round(performance.now() - started) });

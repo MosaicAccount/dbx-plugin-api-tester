@@ -56,7 +56,9 @@ export function defaultGrpc() {
     service: "",
     method: "",
     metadata: [blankKV()],
-    message: "{\n  \n}",
+    // 消息用数组：一元与服务端流只用第一条，客户端流/双向流可以有多条。
+    // 统一成数组后，切换方法类型不需要重排请求体。
+    messages: ["{\n  \n}"],
     timeoutMs: GRPC_TIMEOUT_DEFAULT,
     services: [],
     methods: [],
@@ -79,6 +81,21 @@ export function normalizeKV(value) {
       enabled: item.enabled !== false,
     }));
   return rows.length ? rows : [blankKV()];
+}
+
+/**
+ * 归一化 gRPC 请求消息列表。
+ *
+ * 新快照写的是 `messages` 数组；旧快照只有单条 `message` 字符串，这里顺手迁移，
+ * 避免升级后打开历史记录发现请求体是空的。空数组视为"没填过"，回退到默认值。
+ */
+export function normalizeGrpcMessages(grpc) {
+  if (Array.isArray(grpc?.messages)) {
+    const rows = grpc.messages.filter((item) => typeof item === "string");
+    if (rows.length) return rows;
+  }
+  if (typeof grpc?.message === "string") return [grpc.message];
+  return ["{\n  \n}"];
 }
 
 /** 目录路径归一化：统一分隔符、去重斜杠、去首尾斜杠。 */
@@ -240,8 +257,8 @@ export function applySnapshot(snapshot) {
     target: typeof grpc.target === "string" ? grpc.target : "",
     service: typeof grpc.service === "string" ? grpc.service : "",
     method: typeof grpc.method === "string" ? grpc.method : "",
-    message: typeof grpc.message === "string" ? grpc.message : "{\n  \n}",
     metadata: normalizeKV(grpc.metadata),
+    messages: normalizeGrpcMessages(grpc),
     timeoutMs: clampNumber(grpc.timeoutMs, GRPC_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX),
     tls: Boolean(grpc.tls),
     skipTlsVerify: Boolean(grpc.skipTlsVerify),
@@ -273,7 +290,7 @@ export function toSnapshot(state) {
       service: state.grpc.service,
       method: state.grpc.method,
       metadata: state.grpc.metadata.map((row) => ({ ...row })),
-      message: state.grpc.message,
+      messages: [...state.grpc.messages],
       timeoutMs: state.grpc.timeoutMs,
     },
     responseTab: state.responseTab,

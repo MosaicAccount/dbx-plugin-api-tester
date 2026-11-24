@@ -110,6 +110,9 @@ func TestInvokeGRPCServerStream(t *testing.T) {
 	if !invocation.Streaming {
 		t.Fatalf("expected a streaming invocation: %+v", invocation)
 	}
+	if invocation.StreamKind != "server" {
+		t.Fatalf("expected a server stream, got %q", invocation.StreamKind)
+	}
 	if len(invocation.Messages) == 0 {
 		t.Fatalf("expected at least one streamed message: %+v", invocation)
 	}
