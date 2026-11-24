@@ -15,11 +15,15 @@ import {
   buildRequestUrl,
   byteLength,
   clampNumber,
+  collectFolders,
   defaultGrpc,
   defaultHttp,
   describeErrorKind,
   enabledEntries,
   errorMessage,
+  folderAncestors,
+  folderParent,
+  normalizeFolder,
   requestMethod,
   summarize,
   toSnapshot,
@@ -47,9 +51,11 @@ function createInitialState() {
     protocol: "http",
     activeSavedId: null,
     activeName: "",
+    activeFolder: "",
     http: defaultHttp(),
     grpc: defaultGrpc(),
     savedIndex: [],
+    folderIndex: [],
     historyIndex: [],
     response: null,
     responseTab: "body",
@@ -59,6 +65,9 @@ function createInitialState() {
 }
 
 export const state = writable(createInitialState());
+
+/** 折叠的目录路径集合。仅影响展示，不持久化。 */
+export const collapsedFolders = writable(new Set());
 
 /** 轻提示。null 表示不显示。 */
 export const toast = writable(null);
@@ -109,6 +118,11 @@ async function readIndex(key) {
   return Array.isArray(value) ? value.filter((item) => item && typeof item.id === "string") : [];
 }
 
+async function readFolders(key) {
+  const value = await storage.get(key);
+  return Array.isArray(value) ? value.map(normalizeFolder).filter(Boolean) : [];
+}
+
 export function scheduleDraftPersist() {
   clearTimeout(draftTimer);
   draftTimer = setTimeout(async () => {
@@ -124,6 +138,49 @@ export function scheduleDraftPersist() {
 
 async function persistSavedIndex(index) {
   await storage.set("saved.index", index);
+}
+
+async function persistFolders(folders) {
+  await storage.set("folder.index", folders);
+}
+
+function ensureFolderPath(folders, folder) {
+  const value = normalizeFolder(folder);
+  if (!value) return folders;
+  const known = new Set(folders.map(normalizeFolder));
+  const next = [...folders];
+  for (const path of folderAncestors(value)) {
+    if (known.has(path)) continue;
+    next.push(path);
+    known.add(path);
+  }
+  return next.sort((a, b) => a.localeCompare(b));
+}
+
+function expandFolder(folder) {
+  const target = normalizeFolder(folder);
+  if (!target) return;
+  collapsedFolders.update((set) => {
+    if (!set.has(target)) return set;
+    const next = new Set(set);
+    next.delete(target);
+    return next;
+  });
+}
+
+export function toggleFolder(folder) {
+  collapsedFolders.update((set) => {
+    const next = new Set(set);
+    if (next.has(folder)) next.delete(folder);
+    else next.add(folder);
+    return next;
+  });
+}
+
+/** 目录列表：已登记目录与请求实际所在目录的并集。 */
+export function listFolders() {
+  const s = current();
+  return collectFolders(s.folderIndex, s.savedIndex);
 }
 
 // ---------------------------------------------------------------------------
@@ -144,9 +201,13 @@ export async function initialize() {
     onWriteFailed: () => showToast(t("storageUnavailable"), "warn"),
   });
 
-  const [savedIndex, historyIndex] = await Promise.all([readIndex("saved.index"), readIndex("history.index")]);
+  const [savedIndex, folderIndex, historyIndex] = await Promise.all([
+    readIndex("saved.index"),
+    readFolders("folder.index"),
+    readIndex("history.index"),
+  ]);
 
-  update((s) => ({ ...s, ready: true, savedIndex, historyIndex }));
+  update((s) => ({ ...s, ready: true, savedIndex, folderIndex, historyIndex }));
 
   const draft = await storage.get("draft");
   if (draft && typeof draft === "object") applySnapshotToState(draft);
@@ -247,22 +308,26 @@ export function setGrpcMethod(method) {
 // 新建 / 保存 / 打开 / 删除
 // ---------------------------------------------------------------------------
 
-export function newRequest() {
+export function newRequest(folder) {
+  const target = normalizeFolder(folder);
   update((s) => ({
     ...s,
     activeSavedId: null,
     activeName: "",
+    activeFolder: target,
     http: defaultHttp(),
     grpc: defaultGrpc(),
     response: null,
     responseTab: "body",
   }));
+  expandFolder(target);
   scheduleDraftPersist();
+  if (target) showToast(t("newRequestInFolder", { folder: target }), "ok");
 }
 
 /**
  * 保存当前请求。
- * @param {{ name: string } | null} identity 保存归属；为 null 表示放弃保存。
+ * @param {{ name: string, folder?: string } | null} identity 保存归属；为 null 表示放弃保存。
  * @param {boolean} asNew 为 true 时总是创建新条目。
  */
 export async function saveCurrent(identity, asNew) {
@@ -271,9 +336,10 @@ export async function saveCurrent(identity, asNew) {
   const s = current();
   const payload = toSnapshot(s);
   const name = identity.name;
+  const folder = normalizeFolder(identity.folder);
   const id = asNew || !s.activeSavedId ? uid() : s.activeSavedId;
 
-  const record = { ...payload, name };
+  const record = { ...payload, name, folder };
   if (byteLength(JSON.stringify(record)) > SAVE_LIMIT) {
     showToast(t("requestTooLarge"), "error");
     return null;
@@ -285,9 +351,16 @@ export async function saveCurrent(identity, asNew) {
     return null;
   }
 
+  let folderIndex = s.folderIndex;
+  if (folder) {
+    folderIndex = ensureFolderPath(folderIndex, folder);
+    await persistFolders(folderIndex);
+  }
+
   const entry = {
     id,
     name,
+    folder,
     protocol: payload.protocol,
     method: requestMethod(payload),
     summary: summarize(payload, t("untitled")),
@@ -298,8 +371,9 @@ export async function saveCurrent(identity, asNew) {
   if (existing >= 0) savedIndex[existing] = { ...savedIndex[existing], ...entry };
   else savedIndex.unshift(entry);
 
-  update((st) => ({ ...st, savedIndex, activeSavedId: id, activeName: name }));
+  update((st) => ({ ...st, savedIndex, folderIndex, activeSavedId: id, activeName: name, activeFolder: folder }));
   await persistSavedIndex(savedIndex);
+  expandFolder(folder);
   showToast(t("savedToast", { name }), "ok");
   scheduleDraftPersist();
   return { id, name };
@@ -317,6 +391,7 @@ export async function openSaved(id) {
     ...s,
     activeSavedId: id,
     activeName: entry?.name || payload.name || t("untitled"),
+    activeFolder: normalizeFolder(entry?.folder ?? payload.folder),
   }));
   scheduleDraftPersist();
 }
@@ -328,7 +403,7 @@ export async function openHistory(id) {
     return;
   }
   applySnapshotToState(payload);
-  update((s) => ({ ...s, activeSavedId: null, activeName: "" }));
+  update((s) => ({ ...s, activeSavedId: null, activeName: "", activeFolder: "" }));
   scheduleDraftPersist();
 }
 
@@ -338,9 +413,32 @@ export async function deleteSaved(id) {
   update((s) => ({
     ...s,
     savedIndex,
-    ...(s.activeSavedId === id ? { activeSavedId: null, activeName: "" } : {}),
+    ...(s.activeSavedId === id ? { activeSavedId: null, activeName: "", activeFolder: "" } : {}),
   }));
   await persistSavedIndex(savedIndex);
+}
+
+export async function moveSaved(id, folder) {
+  const target = normalizeFolder(folder);
+  const savedIndex = current().savedIndex.map((item) => (item.id === id ? { ...item, folder: target } : item));
+  const record = await storage.get(savedKey(id));
+  if (record && typeof record === "object") {
+    await storage.set(savedKey(id), { ...record, folder: target });
+  }
+  let folderIndex = current().folderIndex;
+  if (target) {
+    folderIndex = ensureFolderPath(folderIndex, target);
+    await persistFolders(folderIndex);
+  }
+  update((s) => ({
+    ...s,
+    savedIndex,
+    folderIndex,
+    ...(s.activeSavedId === id ? { activeFolder: target } : {}),
+  }));
+  await persistSavedIndex(savedIndex);
+  expandFolder(target);
+  showToast(t("movedToast", { folder: target || t("ungrouped") }), "ok");
 }
 
 export async function clearHistory() {
@@ -379,6 +477,155 @@ async function addHistory(payload) {
   }
   update((s) => ({ ...s, historyIndex }));
   await storage.set("history.index", historyIndex);
+}
+
+// ---------------------------------------------------------------------------
+// 目录
+// ---------------------------------------------------------------------------
+
+export async function createFolder(parent, name) {
+  const base = normalizeFolder(parent);
+  const path = normalizeFolder(base ? `${base}/${name}` : name);
+  if (!path) return false;
+  const folderIndex = ensureFolderPath(current().folderIndex, path);
+  update((s) => ({ ...s, folderIndex }));
+  await persistFolders(folderIndex);
+  expandFolder(base);
+  showToast(t("createdFolderToast", { name: path }), "ok");
+  return true;
+}
+
+/** 删除目录及其下所有请求。 */
+/**
+ * 把目录（连同整棵子树）移动到另一个目录下。
+ *
+ * - 目标为空字符串表示移到根（未分组同级），只改目录层级，不动其中的请求归属语义。
+ * - 不能移到自己或自己的子孙目录下，否则会把子树挂成环。
+ * - 目录里所有请求的 folder 前缀要一起重写，否则请求会留在旧的路径下变成孤儿。
+ */
+export async function moveFolder(path, targetParent) {
+  const source = normalizeFolder(path);
+  if (!source) return false;
+  const parent = normalizeFolder(targetParent);
+
+  // 目标不能是自身或自身的子孙。
+  if (parent === source || parent.startsWith(`${source}/`)) return false;
+
+  const baseName = source.slice(source.lastIndexOf("/") + 1);
+  const nextPath = parent ? `${parent}/${baseName}` : baseName;
+  if (nextPath === source) return false;
+
+  const s = current();
+  const prefix = `${source}/`;
+
+  const remap = (folder) => {
+    const value = normalizeFolder(folder);
+    if (value === source) return nextPath;
+    if (value.startsWith(prefix)) return `${nextPath}/${value.slice(prefix.length)}`;
+    return value;
+  };
+
+  // 目录索引：重写被移动子树里的每一项。
+  const folderIndex = s.folderIndex.map(remap);
+  const normalized = [...new Set(folderIndex.map(normalizeFolder).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const withParents = ensureFolderPath(normalized, nextPath);
+
+  // 请求索引与各自的记录都跟着改。
+  const movedItems = s.savedIndex.filter((item) => {
+    const value = normalizeFolder(item.folder);
+    return value === source || value.startsWith(prefix);
+  });
+  for (const item of movedItems) {
+    const record = await storage.get(savedKey(item.id));
+    if (record && typeof record === "object") {
+      await storage.set(savedKey(item.id), { ...record, folder: remap(item.folder) });
+    }
+  }
+  const savedIndex = s.savedIndex.map((item) =>
+    movedItems.some((moved) => moved.id === item.id) ? { ...item, folder: remap(item.folder) } : item,
+  );
+
+  // 折叠状态跟着新路径走，避免展开状态错位。
+  collapsedFolders.update((set) => {
+    const next = new Set();
+    for (const candidate of set) next.add(remap(candidate));
+    return next;
+  });
+
+  update((st) => ({
+    ...st,
+    savedIndex,
+    folderIndex: withParents,
+    ...(st.activeFolder === source || st.activeFolder.startsWith(prefix)
+      ? { activeFolder: remap(st.activeFolder) }
+      : {}),
+  }));
+
+  await persistSavedIndex(savedIndex);
+  await persistFolders(withParents);
+  expandFolder(parent);
+  showToast(t("movedFolderToast", { name: nextPath }), "ok");
+  return true;
+}
+
+/** 删除目录及其下所有请求。 */
+export async function deleteFolder(path) {
+  const target = normalizeFolder(path);
+  if (!target) return false;
+  const prefix = `${target}/`;
+  const s = current();
+  const removedItems = s.savedIndex.filter((item) => {
+    const itemFolder = normalizeFolder(item.folder);
+    return itemFolder === target || itemFolder.startsWith(prefix);
+  });
+
+  for (const item of removedItems) await storage.remove(savedKey(item.id));
+
+  const removedIds = new Set(removedItems.map((item) => item.id));
+  const savedIndex = s.savedIndex.filter((item) => !removedIds.has(item.id));
+  const folderIndex = s.folderIndex.filter((candidate) => {
+    const value = normalizeFolder(candidate);
+    return value !== target && !value.startsWith(prefix);
+  });
+
+  collapsedFolders.update((set) => {
+    const next = new Set();
+    for (const candidate of set) {
+      if (candidate === target || candidate.startsWith(prefix)) continue;
+      next.add(candidate);
+    }
+    return next;
+  });
+
+  update((st) => {
+    const next = { ...st, savedIndex, folderIndex };
+    if (st.activeSavedId && removedIds.has(st.activeSavedId)) {
+      next.activeSavedId = null;
+      next.activeName = "";
+      next.activeFolder = "";
+    } else if (st.activeFolder === target || st.activeFolder.startsWith(prefix)) {
+      next.activeFolder = folderParent(target);
+    }
+    return next;
+  });
+
+  await persistSavedIndex(savedIndex);
+  await persistFolders(folderIndex);
+  showToast(t("deletedFolderToast", { name: target }), "ok");
+  return true;
+}
+
+/** 待删除目录的统计信息，供确认框展示。 */
+export function folderDeleteStats(path) {
+  const target = normalizeFolder(path);
+  const prefix = `${target}/`;
+  const s = current();
+  const requests = s.savedIndex.filter((item) => {
+    const folder = normalizeFolder(item.folder);
+    return folder === target || folder.startsWith(prefix);
+  }).length;
+  const folders = collectFolders(s.folderIndex, s.savedIndex).filter((candidate) => candidate.startsWith(prefix)).length;
+  return { requests, folders };
 }
 
 // ---------------------------------------------------------------------------

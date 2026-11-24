@@ -13,9 +13,15 @@
   import * as host from "./lib/host.js";
   import {
     clearHistory,
+    createFolder,
+    deleteFolder,
     deleteSaved,
+    folderDeleteStats,
     initialize,
     invokeGrpc,
+    listFolders,
+    moveFolder,
+    moveSaved,
     newRequest,
     openHistory,
     openSaved,
@@ -27,7 +33,17 @@
     state as appState,
     toast as toastStore,
   } from "./lib/store.js";
-  import { suggestName, toSnapshot } from "./lib/model.js";
+  import {
+    SAVE_AS_SHORTCUT,
+    SAVE_SHORTCUT,
+    entryMethod,
+    methodTone,
+    normalizeFolder,
+    protocolTone,
+    shouldShowMethod,
+    suggestName,
+    toSnapshot,
+  } from "./lib/model.js";
   import SavedTree from "./components/SavedTree.svelte";
   import HistoryList from "./components/HistoryList.svelte";
   import HttpPanel from "./components/HttpPanel.svelte";
@@ -41,6 +57,8 @@
   let dialog = $state(null);
   /** 新建菜单。 */
   let sideMenu = $state(null);
+  /** 侧栏拖拽中的请求与指针位置；null 表示没有拖拽。 */
+  let dragState = $state(null);
   let menuPosition = $state({ left: 8, top: 0 });
 
   const title = $derived(
@@ -84,7 +102,8 @@
   // 新建菜单
   // -------------------------------------------------------------------------
 
-  function openNewMenu(anchor) {
+  function openNewMenu(folder, anchor) {
+    const target = normalizeFolder(folder);
     if (sideMenu?.anchor === anchor) {
       sideMenu = null;
       return;
@@ -96,7 +115,10 @@
     };
     sideMenu = {
       anchor,
-      items: [{ label: t("newRequest"), run: () => newRequest() }],
+      items: [
+        { label: t("newRequest"), run: () => newRequest(target) },
+        { label: target ? t("newSubfolder") : t("newFolder"), run: () => askFolderName(target) },
+      ],
     };
   }
 
@@ -127,17 +149,36 @@
   // 模态框
   // -------------------------------------------------------------------------
 
+  function askFolderName(parent) {
+    dialog = {
+      kind: "folder",
+      title: t("newFolderTitle"),
+      input: true,
+      inputLabel: t("newFolderLabel"),
+      placeholder: t("folderNamePlaceholder"),
+      confirmLabel: t("create"),
+      validate: (value) => (value.name ? "" : t("needFolderName")),
+      parent: normalizeFolder(parent),
+    };
+  }
+
   async function onDialogResolve(result) {
     const pending = dialog;
     dialog = null;
     if (!pending || result === null || result === false) return;
 
     switch (pending.kind) {
+      case "folder":
+        await createFolder(pending.parent, result.name);
+        break;
       case "save":
-        await saveCurrent({ name: result.name }, pending.asNew);
+        await saveCurrent({ name: result.name, folder: result.folder }, pending.asNew);
         break;
       case "confirm-delete":
         await deleteSaved(pending.id);
+        break;
+      case "confirm-delete-folder":
+        await deleteFolder(pending.path);
         break;
       case "confirm-clear-history":
         await clearHistory();
@@ -151,7 +192,7 @@
     const s = $appState;
     // 已有归属且不是「另存为」时直接覆盖，不再打扰用户填名称。
     if (!asNew && s.activeSavedId && s.activeName) {
-      void saveCurrent({ name: s.activeName }, false);
+      void saveCurrent({ name: s.activeName, folder: s.activeFolder }, false);
       return;
     }
     dialog = {
@@ -162,8 +203,16 @@
       inputLabel: t("requestNameLabel"),
       inputValue: s.activeName || suggestName(toSnapshot(s), t("untitled")),
       placeholder: t("savePromptPlaceholder"),
+      folder: true,
+      folderLabel: t("saveLocationLabel"),
+      folderValue: s.activeFolder || "",
+      folders: listFolders(),
       confirmLabel: t("save"),
-      validate: (value) => (value.name ? "" : t("needName")),
+      validate: (value, context) => {
+        if (!value.name) return t("needName");
+        if (context.creatingFolder && !value.folder) return t("needFolderName");
+        return "";
+      },
     };
   }
 
@@ -174,6 +223,18 @@
       id,
       title: t("deleteTitle"),
       message: t("deleteMessage", { name: entry?.name || t("untitled") }),
+      confirmLabel: t("delete"),
+      danger: true,
+    };
+  }
+
+  function confirmDeleteFolder(path) {
+    const stats = folderDeleteStats(path);
+    dialog = {
+      kind: "confirm-delete-folder",
+      path,
+      title: t("deleteFolderTitle"),
+      message: t("deleteFolderMessage", { name: path, requests: stats.requests, folders: stats.folders }),
       confirmLabel: t("delete"),
       danger: true,
     };
@@ -224,7 +285,7 @@
     <p>{t("hostUnavailable")}</p>
   </div>
 {:else}
-  <div class="app">
+  <div class="app" class:is-dragging={dragState !== null}>
     <aside class="sidebar">
       <div class="brand">
         <svg class="brand-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true">
@@ -246,20 +307,31 @@
           type="button"
           aria-haspopup="menu"
           aria-expanded={Boolean(sideMenu)}
-          aria-label={t("newRequest")}
-          title={t("newRequest")}
-          onclick={(event) => openNewMenu(event.currentTarget)}>+</button
+          aria-label={t("newAction")}
+          title={t("newAction")}
+          onclick={(event) => openNewMenu("", event.currentTarget)}>+</button
         >
       </div>
       <div class="side-list">
         <SavedTree
           {t}
           savedIndex={$appState.savedIndex}
+          folderIndex={$appState.folderIndex}
           activeSavedId={$appState.activeSavedId}
           onopen={(id) => void openSaved(id)}
+          onadd={(folder, anchor) => openNewMenu(folder, anchor)}
+          onmoverequest={(id, folder) => void moveSaved(id, folder)}
+          onmovefolder={(path, parent) => void moveFolder(path, parent)}
           ondelete={(id) => confirmDelete(id)}
+          ondeletefolder={(path) => confirmDeleteFolder(path)}
+          onDragChange={(next) => (dragState = next)}
         />
       </div>
+      <!-- 拖拽是隐式交互，需要一句提示让用户发现它。 -->
+      {#if $appState.savedIndex.length > 0}
+        <p class="side-hint hint">{t("dragHint")}</p>
+      {/if}
+
       <div class="side-head side-head--history">
         <span>{t("history")}</span>
         <button class="link-btn" type="button" onclick={confirmClearHistory}>{t("clear")}</button>
@@ -291,13 +363,13 @@
           <button
             class="btn btn-ghost btn-sm"
             type="button"
-            title={t("saveAs")}
+            title={t("saveAsHint", { shortcut: SAVE_AS_SHORTCUT })}
             onclick={() => save(true)}>{t("saveAs")}</button
           >
           <button
             class="btn btn-secondary btn-sm"
             type="button"
-            title={t("save")}
+            title={t("saveHint", { shortcut: SAVE_SHORTCUT })}
             onclick={() => save(false)}>{t("save")}</button
           >
         </div>
@@ -341,6 +413,10 @@
     inputLabel={dialog.inputLabel || ""}
     inputValue={dialog.inputValue || ""}
     placeholder={dialog.placeholder || ""}
+    folder={Boolean(dialog.folder)}
+    folderLabel={dialog.folderLabel || ""}
+    folderValue={dialog.folderValue || ""}
+    folders={dialog.folders || []}
     confirmLabel={dialog.confirmLabel || ""}
     danger={Boolean(dialog.danger)}
     validate={dialog.validate || null}
@@ -350,4 +426,38 @@
 
 {#if $toastStore}
   <div class="toast toast--{$toastStore.tone}" role="status">{$toastStore.message}</div>
+{/if}
+
+<!-- 拖拽拖影：渲染在 App 顶层，脱离侧栏列表的 overflow 裁切。 -->
+{#if dragState}
+  <div
+    class="drag-ghost"
+    class:is-folder={dragState.kind === "folder"}
+    class:is-over-target={dragState.overTarget}
+    style:left={`${dragState.x}px`}
+    style:top={`${dragState.y}px`}
+    aria-hidden="true"
+  >
+    {#if dragState.kind === "folder"}
+      <span class="folder-icon">
+        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true"
+          ><path
+            d="M2.5 4.5A1.5 1.5 0 0 1 4 3h2.4l1.2 1.6H12a1.5 1.5 0 0 1 1.5 1.5v5.4A1.5 1.5 0 0 1 12 13H4a1.5 1.5 0 0 1-1.5-1.5z"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linejoin="round"
+          /></svg
+        >
+      </span>
+      <span class="drag-ghost-name">{dragState.name}</span>
+    {:else}
+      <span class="proto-badge is-{protocolTone(dragState.item.protocol)}"
+        >{dragState.item.protocol === "grpc" ? "GRPC" : "HTTP"}</span
+      >
+      {#if shouldShowMethod(dragState.item)}
+        <span class="method-tag is-{methodTone(entryMethod(dragState.item))}">{entryMethod(dragState.item)}</span>
+      {/if}
+      <span class="drag-ghost-name">{dragState.item.name || t("untitled")}</span>
+    {/if}
+  </div>
 {/if}

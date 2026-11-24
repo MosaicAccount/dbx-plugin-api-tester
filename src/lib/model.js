@@ -11,6 +11,13 @@ export const HISTORY_LIMIT = 30;
 export const DRAFT_LIMIT = 200000;
 export const SAVE_LIMIT = 240000;
 export const BRIDGE_BODY_LIMIT = 1800000;
+export const NEW_FOLDER = "__new__";
+
+export const IS_MAC =
+  typeof navigator === "undefined" ? false : /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
+export const SAVE_SHORTCUT = IS_MAC ? "⌘S" : "Ctrl+S";
+export const SAVE_AS_SHORTCUT = IS_MAC ? "⇧⌘S" : "Ctrl+Shift+S";
+
 export const BODY_CONTENT_TYPES = {
   json: "application/json",
   text: "text/plain",
@@ -72,6 +79,42 @@ export function normalizeKV(value) {
       enabled: item.enabled !== false,
     }));
   return rows.length ? rows : [blankKV()];
+}
+
+/** 目录路径归一化：统一分隔符、去重斜杠、去首尾斜杠。 */
+export function normalizeFolder(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^\/+|\/+$/g, "");
+}
+
+export function folderParent(folder) {
+  const value = normalizeFolder(folder);
+  const index = value.lastIndexOf("/");
+  return index > 0 ? value.slice(0, index) : "";
+}
+
+/** 返回 `a`、`a/b`、`a/b/c` 这样的全部祖先路径。 */
+export function folderAncestors(folder) {
+  const value = normalizeFolder(folder);
+  if (!value) return [];
+  const parts = value.split("/");
+  const paths = [];
+  for (let index = 1; index <= parts.length; index += 1) paths.push(parts.slice(0, index).join("/"));
+  return paths;
+}
+
+/** 合并已保存请求所在目录与显式登记的目录，得到完整目录列表。 */
+export function collectFolders(folderIndex, savedIndex) {
+  const folders = new Set((folderIndex || []).map(normalizeFolder).filter(Boolean));
+  for (const item of savedIndex || []) {
+    const folder = normalizeFolder(item.folder);
+    if (folder) for (const path of folderAncestors(folder)) folders.add(path);
+  }
+  return [...folders].sort((a, b) => a.localeCompare(b));
 }
 
 export function contentTypeForBody(bodyType) {

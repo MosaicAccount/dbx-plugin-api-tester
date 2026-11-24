@@ -234,6 +234,26 @@ textarea {
   cursor: pointer;
 }
 
+/* 拖拽中：原行淡出，表示这条已经被"拿走"。 */
+.side-item.is-dragging {
+  opacity: 0.4;
+  /* 拖动过程中不要触发文本选中，否则会拖出一片蓝色高亮。 */
+  user-select: none;
+}
+
+/*
+ * 拖拽期间指针会跑到别的行、目录、编辑区上，那些元素各自有 cursor 规则；
+ * 这里统一覆盖成"抓取中"，让手型在整个拖拽过程中保持一致。
+ */
+.app.is-dragging,
+.app.is-dragging * {
+  cursor: grabbing !important;
+}
+
+.app.is-dragging {
+  user-select: none;
+}
+
 .side-item:hover {
   --row-bg: color-mix(in srgb, var(--panel) 92%, var(--fg));
 }
@@ -281,6 +301,50 @@ textarea {
 .side-item:has(.icon-btn:focus-visible) .side-actions {
   opacity: 1;
   pointer-events: auto;
+}
+
+/*
+ * 拖拽时跟随指针的拖影。
+ *
+ * position: fixed 用视口坐标，pointermove 里直接写 left/top；
+ * pointer-events: none 保证它不干扰下面的目录行命中。
+ */
+.drag-ghost {
+  position: fixed;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+  font-size: 12px;
+  font-weight: 550;
+  pointer-events: none;
+  /* 让指针落在拖影左上角附近，而不是遮住它。 */
+  transform: translate(10px, 8px) rotate(-1.5deg) scale(0.98);
+  opacity: 0.96;
+}
+
+/* 悬在可投放目录上时，拖影跟着"收紧"，提示可以松手。 */
+.drag-ghost.is-over-target {
+  border-color: var(--primary);
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--primary) 28%, transparent);
+  transform: translate(10px, 8px) rotate(0deg) scale(1);
+}
+
+.drag-ghost-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 目录被拖动时同样淡出，和接口行的反馈保持一致。 */
+.folder-head.is-dragging {
+  opacity: 0.4;
 }
 
 /* 协议徽标：实心色块 + 反白字，与浅底彩色的请求方式标签在形态上区分开。 */
@@ -353,6 +417,7 @@ textarea {
   color: var(--tag-options);
 }
 
+
 .side-name {
   overflow: hidden;
   flex: 1;
@@ -374,6 +439,82 @@ textarea {
   padding: 4px 8px;
   color: var(--muted);
   font-size: 11.5px;
+}
+
+.folder-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin-top: 2px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+
+.folder-head:hover,
+.folder-head:focus-visible {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+/* 拖拽经过的目录：描边 + 底色，明确"松手就放到这里"。 */
+.folder-head.is-drop-target {
+  border: 1px dashed var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--fg);
+}
+
+.folder-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--muted);
+}
+
+.folder-head:hover .folder-icon {
+  color: inherit;
+}
+
+.folder-actions {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  z-index: 1;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: opacity 0.12s ease;
+}
+
+.folder-head:hover .folder-actions,
+.folder-head:focus-visible .folder-actions,
+.folder-head:has(.icon-btn:focus-visible) .folder-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.folder-head:hover .folder-count,
+.folder-head:focus-visible .folder-count,
+.folder-head:has(.icon-btn:focus-visible) .folder-count {
+  opacity: 0;
+}
+
+.folder-add {
+  font-weight: 600;
+}
+
+.folder-delete {
+  font-size: 14px;
 }
 
 .side-menu {
@@ -404,6 +545,47 @@ textarea {
 .side-menu-item:focus-visible {
   background: color-mix(in srgb, var(--fg) 7%, transparent);
   outline: none;
+}
+
+.folder-chevron {
+  display: inline-flex;
+  flex: none;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.folder-head.is-collapsed .folder-chevron {
+  transform: rotate(-90deg);
+}
+
+.folder-name {
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-count {
+  flex: none;
+  min-width: 18px;
+  border-radius: 999px;
+  padding: 1px 6px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 15px;
+  text-align: center;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.side-hint {
+  margin: 0 14px 4px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.35;
 }
 
 .side-foot {
