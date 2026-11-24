@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package demo.v1;
+
+option go_package = "github.com/jlian/dbx-plugin-api-tester/examples/grpc-testserver/gen/demo/v1;demov1";
+
+// Greeter 是一个专门用来测试 gRPC 客户端的服务：
+// 四个方法分别对应一元、服务端流、客户端流、双向流。
+service Greeter {
+  // 一元：一条请求，一条响应。
+  rpc SayHello(HelloRequest) returns (HelloReply);
+
+  // 服务端流：一条请求，服务端推送 count 条响应。
+  rpc SayHelloStream(HelloRequest) returns (stream HelloReply);
+
+  // 客户端流：客户端推送多条请求，服务端最后返回一条汇总。
+  rpc CollectHellos(stream HelloRequest) returns (HelloSummary);
+
+  // 双向流：每收到一条就回一条，直到客户端关闭发送方向。
+  rpc Chat(stream ChatMessage) returns (stream ChatMessage);
+}
+
+message HelloRequest {
+  // 打招呼的名字，留空时按 "world" 处理。
+  string name = 1;
+
+  // 服务端流要推送的条数，默认 5，范围 1-50。
+  // 客户端流与双向流会忽略该字段。
+  int32 count = 2;
+
+  // 延迟毫秒数：一元调用在响应前等待，流式调用在每条消息之间等待。
+  // 用来测试超时、流式进度和取消。
+  int64 delay_ms = 3;
+
+  // 置为 true 时服务端返回 FailedPrecondition，用来测试错误展示。
+  bool fail = 4;
+}
+
+message HelloReply {
+  // 形如 "Hello, world! (#1)"。
+  string message = 1;
+
+  // 当前是第几条响应，从 1 开始。
+  int32 index = 2;
+
+  // 服务端发送时刻的 Unix 毫秒时间戳。
+  int64 server_time_ms = 3;
+
+  // 回显本次调用携带的 metadata（小写 key），方便验证 metadata 是否发到了服务端。
+  map<string, string> metadata = 4;
+}
+
+message HelloSummary {
+  // 客户端一共发了几条消息。
+  int32 count = 1;
+
+  // 按接收顺序记录每条消息里的 name。
+  repeated string names = 2;
+
+  // 服务端发送时刻的 Unix 毫秒时间戳。
+  int64 server_time_ms = 3;
+}
+
+message ChatMessage {
+  // 聊天内容。
+  string text = 1;
+
+  // 服务端回填的消息序号，从 1 开始。
+  int32 index = 2;
+
+  // 服务端发送时刻的 Unix 毫秒时间戳。
+  int64 server_time_ms = 3;
+}

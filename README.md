@@ -54,12 +54,19 @@
 
 1. 填写目标地址，例如 `localhost:50051`；TLS 服务勾选 **TLS**
 2. 点击 **发现服务**（服务端需开启 Server Reflection）
-3. 选择 service / method，填写 JSON 请求消息
-4. 点击 **调用**；服务端流式方法会展示多条消息
+3. 选择 service / method，填写 JSON 请求消息；客户端流 / 双向流可以点「添加消息」逐条填写
+4. 点击 **调用**；流式方法会展示多条响应消息
 
 > 双向流目前是「一次发送、一次接收」：所有消息要在点「调用」之前填好。想按服务端回复
 > 决定下一条发什么的交互式用法尚未实现，设计记录见
 > [docs/grpc-interactive-streaming.md](docs/grpc-interactive-streaming.md)。
+
+本地没有现成的 gRPC 服务时，可以直接用仓库自带的测试服务 `examples/grpc-testserver`：
+它开启了 Server Reflection，四个方法分别覆盖一元、服务端流、客户端流、双向流。
+
+```bash
+cd examples/grpc-testserver && go run .    # 默认监听 localhost:50051
+```
 
 ## 项目结构
 
@@ -89,6 +96,7 @@ backend/
   internal/grpctool/     # gRPC 反射、动态编解码、调用
   internal/rpc/          # JSON-RPC 分发与方法登记
   sdk/                   # 随插件 CLI 0.1.10 分发的 DBX Go SDK（见下）
+examples/grpc-testserver/ # 本地 gRPC 测试服务，覆盖四种调用方式（见其 README）
 docs/                    # 设计记录（交互式双向流尚未实现）
 assets/plugin.svg
 ```
