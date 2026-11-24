@@ -1,14 +1,16 @@
-package main
+package httptool
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jlian/dbx-plugin-api-tester/internal/apperr"
+	"github.com/jlian/dbx-plugin-api-tester/internal/values"
 )
 
 func TestSendHTTPGet(t *testing.T) {
@@ -20,7 +22,7 @@ func TestSendHTTPGet(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, pluginError := sendHTTP(httpSendParams{Method: "GET", URL: server.URL})
+	result, pluginError := Send(SendParams{Method: "GET", URL: server.URL})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
@@ -46,10 +48,10 @@ func TestSendHTTPPostBodyAndHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, pluginError := sendHTTP(httpSendParams{
+	result, pluginError := Send(SendParams{
 		Method:       "post",
 		URL:          server.URL,
-		Headers:      []keyValue{{Name: "X-Custom", Value: "abc"}},
+		Headers:      []values.KeyValue{{Name: "X-Custom", Value: "abc"}},
 		BodyText:     `{"hello":"world"}`,
 		BodyEncoding: "text",
 	})
@@ -69,7 +71,7 @@ func TestSendHTTPBase64Body(t *testing.T) {
 	defer server.Close()
 
 	payload := []byte{0, 1, 2, 3, 254, 255}
-	result, pluginError := sendHTTP(httpSendParams{
+	result, pluginError := Send(SendParams{
 		Method:       "PUT",
 		URL:          server.URL,
 		BodyBase64:   base64.StdEncoding.EncodeToString(payload),
@@ -91,7 +93,7 @@ func TestSendHTTPBinaryResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, pluginError := sendHTTP(httpSendParams{Method: "GET", URL: server.URL})
+	result, pluginError := Send(SendParams{Method: "GET", URL: server.URL})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
@@ -115,7 +117,7 @@ func TestSendHTTPRedirects(t *testing.T) {
 	defer server.Close()
 
 	follow := true
-	result, pluginError := sendHTTP(httpSendParams{Method: "GET", URL: server.URL + "/redirect", FollowRedirects: &follow})
+	result, pluginError := Send(SendParams{Method: "GET", URL: server.URL + "/redirect", FollowRedirects: &follow})
 	if pluginError != nil {
 		t.Fatalf("unexpected error when following redirects: %v", pluginError)
 	}
@@ -127,7 +129,7 @@ func TestSendHTTPRedirects(t *testing.T) {
 	}
 
 	noFollow := false
-	result, pluginError = sendHTTP(httpSendParams{Method: "GET", URL: server.URL + "/redirect", FollowRedirects: &noFollow})
+	result, pluginError = Send(SendParams{Method: "GET", URL: server.URL + "/redirect", FollowRedirects: &noFollow})
 	if pluginError != nil {
 		t.Fatalf("unexpected error without redirects: %v", pluginError)
 	}
@@ -143,7 +145,7 @@ func TestSendHTTPTruncatesLargeBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, pluginError := sendHTTP(httpSendParams{Method: "GET", URL: server.URL, MaxBodyBytes: 1024})
+	result, pluginError := Send(SendParams{Method: "GET", URL: server.URL, MaxBodyBytes: 1024})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
@@ -159,33 +161,35 @@ func TestSendHTTPTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, pluginError := sendHTTP(httpSendParams{Method: "GET", URL: server.URL, TimeoutMs: 50})
+	_, pluginError := Send(SendParams{Method: "GET", URL: server.URL, TimeoutMs: 50})
 	if pluginError == nil {
 		t.Fatal("expected a timeout error")
 	}
-	data, _ := json.Marshal(pluginError.Data)
-	if !strings.Contains(string(data), "timeout") {
-		t.Fatalf("expected timeout kind, got %s", data)
+	if pluginError.Kind != apperr.KindTimeout {
+		t.Fatalf("expected timeout kind, got %q", pluginError.Kind)
+	}
+	if pluginError.Code != apperr.CodeUpstream {
+		t.Fatalf("expected upstream code, got %d", pluginError.Code)
 	}
 }
 
 func TestSendHTTPValidation(t *testing.T) {
-	cases := []httpSendParams{
+	cases := []SendParams{
 		{Method: "GET", URL: ""},
 		{Method: "GET", URL: "ftp://example.com/file"},
 		{Method: "GET", URL: "example.com"},
 		{Method: "IN VALID", URL: "http://example.com"},
-		{Method: "GET", URL: "http://example.com", Headers: []keyValue{{Name: "X-Test", Value: "bad\r\nInjected: 1"}}},
-		{Method: "GET", URL: "http://example.com", Headers: []keyValue{{Name: "Bad Name", Value: "x"}}},
+		{Method: "GET", URL: "http://example.com", Headers: []values.KeyValue{{Name: "X-Test", Value: "bad\r\nInjected: 1"}}},
+		{Method: "GET", URL: "http://example.com", Headers: []values.KeyValue{{Name: "Bad Name", Value: "x"}}},
 	}
 	for index, params := range cases {
-		if _, pluginError := sendHTTP(params); pluginError == nil {
+		if _, pluginError := Send(params); pluginError == nil {
 			t.Fatalf("case %d should be rejected", index)
 		}
 	}
 }
 
-func hasHeader(entries []keyValue, name, value string) bool {
+func hasHeader(entries []values.KeyValue, name, value string) bool {
 	for _, entry := range entries {
 		if strings.EqualFold(entry.Name, name) && entry.Value == value {
 			return true

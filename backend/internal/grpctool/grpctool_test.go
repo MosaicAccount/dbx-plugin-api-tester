@@ -1,4 +1,4 @@
-package main
+package grpctool
 
 import (
 	"encoding/json"
@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jlian/dbx-plugin-api-tester/internal/values"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -32,11 +33,11 @@ func startHealthServer(t *testing.T) string {
 
 func TestDiscoverGRPCServices(t *testing.T) {
 	target := startHealthServer(t)
-	result, pluginError := discoverGRPCServices(grpcDiscoveryParams{GRPCTargetParams{Target: target, TimeoutMs: 5000}})
+	result, pluginError := Discover(DiscoveryParams{TargetParams{Target: target, TimeoutMs: 5000}})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
-	services := result.(*grpcServicesResult).Services
+	services := result.(*ServicesResult).Services
 	if !contains(services, healthService) {
 		t.Fatalf("expected %s in %v", healthService, services)
 	}
@@ -49,14 +50,14 @@ func TestDiscoverGRPCServices(t *testing.T) {
 
 func TestDescribeGRPCMethods(t *testing.T) {
 	target := startHealthServer(t)
-	result, pluginError := describeGRPCMethods(grpcMethodsParams{
-		GRPCTargetParams: GRPCTargetParams{Target: target, TimeoutMs: 5000},
-		Service:          healthService,
+	result, pluginError := DescribeMethods(MethodsParams{
+		TargetParams: TargetParams{Target: target, TimeoutMs: 5000},
+		Service:      healthService,
 	})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
-	methods := result.(*grpcMethodsResult).Methods
+	methods := result.(*MethodsResult).Methods
 	check := findMethodInfo(methods, "Check")
 	if check == nil || check.ServerStreaming || check.ClientStreaming {
 		t.Fatalf("unexpected Check method: %+v", check)
@@ -72,16 +73,16 @@ func TestDescribeGRPCMethods(t *testing.T) {
 
 func TestInvokeGRPCUnary(t *testing.T) {
 	target := startHealthServer(t)
-	result, pluginError := invokeGRPC(grpcInvokeParams{
-		GRPCTargetParams: GRPCTargetParams{Target: target, TimeoutMs: 5000},
-		Service:          healthService,
-		Method:           "Check",
-		Message:          json.RawMessage(`{"service":""}`),
+	result, pluginError := Invoke(InvokeParams{
+		TargetParams: TargetParams{Target: target, TimeoutMs: 5000},
+		Service:      healthService,
+		Method:       "Check",
+		Message:      json.RawMessage(`{"service":""}`),
 	})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
-	invocation := result.(*grpcInvokeResult)
+	invocation := result.(*InvokeResult)
 	if !invocation.OK {
 		t.Fatalf("expected OK, got %+v", invocation.Status)
 	}
@@ -96,16 +97,16 @@ func TestInvokeGRPCUnary(t *testing.T) {
 
 func TestInvokeGRPCServerStream(t *testing.T) {
 	target := startHealthServer(t)
-	result, pluginError := invokeGRPC(grpcInvokeParams{
-		GRPCTargetParams: GRPCTargetParams{Target: target, TimeoutMs: 1200},
-		Service:          healthService,
-		Method:           "Watch",
-		Message:          json.RawMessage(`{"service":""}`),
+	result, pluginError := Invoke(InvokeParams{
+		TargetParams: TargetParams{Target: target, TimeoutMs: 1200},
+		Service:      healthService,
+		Method:       "Watch",
+		Message:      json.RawMessage(`{"service":""}`),
 	})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
-	invocation := result.(*grpcInvokeResult)
+	invocation := result.(*InvokeResult)
 	if !invocation.Streaming {
 		t.Fatalf("expected a streaming invocation: %+v", invocation)
 	}
@@ -122,31 +123,31 @@ func TestInvokeGRPCServerStream(t *testing.T) {
 
 func TestInvokeGRPCValidation(t *testing.T) {
 	target := startHealthServer(t)
-	cases := []grpcInvokeParams{
-		{GRPCTargetParams: GRPCTargetParams{Target: target, TimeoutMs: 3000}, Service: healthService, Method: "Missing"},
-		{GRPCTargetParams: GRPCTargetParams{Target: target, TimeoutMs: 3000}, Service: "example.Unknown", Method: "Check"},
-		{GRPCTargetParams: GRPCTargetParams{Target: target, TimeoutMs: 3000}, Service: healthService, Method: "Check", Message: json.RawMessage(`{"service":123}`)},
-		{GRPCTargetParams: GRPCTargetParams{Target: "", TimeoutMs: 3000}, Service: healthService, Method: "Check"},
-		{GRPCTargetParams: GRPCTargetParams{Target: "localhost", TimeoutMs: 3000}, Service: healthService, Method: "Check"},
+	cases := []InvokeParams{
+		{TargetParams: TargetParams{Target: target, TimeoutMs: 3000}, Service: healthService, Method: "Missing"},
+		{TargetParams: TargetParams{Target: target, TimeoutMs: 3000}, Service: "example.Unknown", Method: "Check"},
+		{TargetParams: TargetParams{Target: target, TimeoutMs: 3000}, Service: healthService, Method: "Check", Message: json.RawMessage(`{"service":123}`)},
+		{TargetParams: TargetParams{Target: "", TimeoutMs: 3000}, Service: healthService, Method: "Check"},
+		{TargetParams: TargetParams{Target: "localhost", TimeoutMs: 3000}, Service: healthService, Method: "Check"},
 	}
 	for index, params := range cases {
-		if _, pluginError := invokeGRPC(params); pluginError == nil {
+		if _, pluginError := Invoke(params); pluginError == nil {
 			t.Fatalf("case %d should be rejected", index)
 		}
 	}
 }
 
 func TestGRPCMetadataValidation(t *testing.T) {
-	if _, err := metadataFromEntries([]keyValue{{Name: "Bad Key", Value: "x"}}); err == nil {
+	if _, err := metadataFromEntries([]values.KeyValue{{Name: "Bad Key", Value: "x"}}); err == nil {
 		t.Fatal("expected an invalid metadata key error")
 	}
-	if _, err := metadataFromEntries([]keyValue{{Name: "grpc-internal", Value: "x"}}); err == nil {
+	if _, err := metadataFromEntries([]values.KeyValue{{Name: "grpc-internal", Value: "x"}}); err == nil {
 		t.Fatal("expected a reserved metadata key error")
 	}
-	if _, err := metadataFromEntries([]keyValue{{Name: "authorization", Value: "a\r\nb"}}); err == nil {
+	if _, err := metadataFromEntries([]values.KeyValue{{Name: "authorization", Value: "a\r\nb"}}); err == nil {
 		t.Fatal("expected a metadata line break error")
 	}
-	values, err := metadataFromEntries([]keyValue{{Name: "Authorization", Value: "Bearer token"}})
+	values, err := metadataFromEntries([]values.KeyValue{{Name: "Authorization", Value: "Bearer token"}})
 	if err != nil || len(values["authorization"]) != 1 {
 		t.Fatalf("unexpected metadata: %v %v", values, err)
 	}
@@ -172,11 +173,11 @@ func TestNormalizeGRPCTarget(t *testing.T) {
 }
 
 func TestGRPCStatusInfo(t *testing.T) {
-	info := grpcStatusInfoFromError(nil)
+	info := StatusInfoFromError(nil)
 	if info.Code != 0 || info.Name != "OK" {
 		t.Fatalf("unexpected OK status: %+v", info)
 	}
-	info = grpcStatusInfoFromError(nil)
+	info = StatusInfoFromError(nil)
 	if info.Message != "" {
 		t.Fatalf("OK status should not carry a message: %+v", info)
 	}
@@ -191,7 +192,7 @@ func contains(values []string, expected string) bool {
 	return false
 }
 
-func findMethodInfo(methods []grpcMethodInfo, name string) *grpcMethodInfo {
+func findMethodInfo(methods []MethodInfo, name string) *MethodInfo {
 	for index := range methods {
 		if methods[index].Name == name {
 			return &methods[index]
