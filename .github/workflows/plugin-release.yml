@@ -3,12 +3,19 @@ name: Release DBX plugin
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to backfill missing .artifact.json for
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
   release:
+    if: github.event_name == 'release'
     uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@plugin-cli-v0.1.10
     with:
       release-tag: ${{ github.event.release.tag_name }}
@@ -18,3 +25,25 @@ jobs:
       plugin-cli-version: 0.1.10
       go-version: "1.22.x"
       rust-toolchain: ""
+
+  # 复用 workflow 只上传 .dbxp 与 release-candidates.json，每个候选包对应的
+  # .artifact.json 由这一步补齐。脚本以 release-candidates.json 为准，先核对已上传包的
+  # sha256/size，再只补缺失项；已存在的 sidecar 只校验、不覆盖。
+  sidecars:
+    name: Backfill .artifact.json
+    needs: release
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.release.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      # 脚本取自默认分支而不是 Release 的 tag：历史 tag 上可能还没有这个脚本（重发旧
+      # tag 时仍需补传），而补传逻辑本身只依赖 release-candidates.json。
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Backfill missing .artifact.json assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: node scripts/backfill-release-sidecars.mjs --tag "$TAG"

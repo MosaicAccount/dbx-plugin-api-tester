@@ -170,6 +170,12 @@ dbx-plugin package .
 
 每个 target 产出独立的 `.dbxp` 和 `.artifact.json`，作为同一个 Release 的资产。插件 ID、名称和版本在所有包里保持一致，DBX 安装时按用户的 OS/CPU 选择对应包。
 
+复用 workflow 只上传 `.dbxp` 与 `release-candidates.json`，随后由同一次运行的 `sidecars` job 调用 `scripts/backfill-release-sidecars.mjs` 补传每个候选包对应的 `.artifact.json`：先核对已上传包的 `sha256`/`size`，只补缺失项，已有的只校验不覆盖。需要给历史 Release 补时，手动触发该 workflow 并传入 tag：
+
+```bash
+gh workflow run plugin-release.yml -f tag=v0.1.0
+```
+
 也可以直接在对应系统上执行 `dbx-plugin package .`；本机只能产出 `darwin-arm64`。
 
 ## 安全边界
