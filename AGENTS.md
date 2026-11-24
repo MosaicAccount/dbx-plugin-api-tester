@@ -2,36 +2,129 @@
 
 面向 AI 编码助手的仓库规范。保持简短，优先遵守现有代码风格。
 
-## 工作方式
+## 技术栈
 
-- 先读 `manifest.json`、`ui/`、`backend/` 相关文件再修改；只做请求范围内的事。
-- 不做无关重构，不添加推测性功能；没有必要时不写注释。
-- 未经用户明确要求，不要执行 git commit、tag 或 push。
-- `backend/sdk/` 是官方 SDK 的固定副本；除非任务就是升级 SDK，否则不要修改。
-- 修改插件身份或版本时，同步 `manifest.json` 与 `backend/main.go`；插件 ID 固定为 `com.jlian.apitester`。
+| 层 | 选型 | 说明 |
+| --- | --- | --- |
+| 前端 | Svelte 5（runes）+ Vite 7 | 官方 `svelte` 模板同款；产物由 Vite 构建到 `ui/` |
+| 后端 | Go 1.22 + 官方 DBX Go SDK | 以 sidecar 形式运行，stdio-jsonl JSON-RPC |
+| 样式 | 原生 CSS + DBX 主题 token | 不引入 UI 框架或 CSS-in-JS，见 `src/styles.css` |
 
-## 插件边界
+选框架的硬约束来自宿主：DBX 会把 `ui/index.html` 引用的入口脚本与样式表**内联**进沙箱
+iframe，所以构建必须使用相对 `base`（`base: "./"`）。用绝对路径会解析到宿主根目录而 404。
 
-- UI 运行在沙箱 iframe：不要使用 Node.js、直接网络请求、`localStorage`、`navigator.clipboard`；一切通过 `window.dbxPlugin`。
-- 宿主会内联入口脚本，`ui/app.js` 必须保持单文件，不要新增 ES module import。
-- 用户可见文案必须同时提供 `en` 与 `zh`；颜色、圆角、字体使用 `var(--color-*)`、`var(--radius-*)`、`var(--font-*)`。
-- sidecar 的 stdout 只输出 JSON-RPC，日志写 stderr；不得记录凭据、Token、metadata 值或请求体。
-- 后端入口做参数校验：非法参数返回 `-32602`，网络/RPC 失败返回 `-32000`。
+## 目录结构
+
+```
+manifest.json          插件身份/权限/入口，改版本时与 backend/main.go 同步
+dbx-plugin.toml        打包 include 与 [dev] 构建命令
+vite.config.js         前端构建；相对 base + DBX_UI_BUILD_SUCCESS 构建信号
+src/
+  main.js              入口：挂载 App，引入全局样式
+  app.d.ts             window.dbxPlugin 的最小类型声明
+  App.svelte           根组件：布局装配、全局快捷键、模态框编排
+  styles.css           全部样式（DBX token 驱动，含深色主题）
+  lib/
+    host.js            唯一允许访问 window.dbxPlugin 的地方
+    i18n.js            en/zh 词典与 t()；新增文案两种语言都要补
+    model.js           领域常量与纯函数（无 DOM、无宿主，可单测）
+    format.js          JSON 高亮与响应体呈现（纯函数）
+    store.js           全部可变状态与持久化 action
+  components/          按界面区域拆分的展示组件
+backend/
+  main.go              仅装配：SDK 适配、panic 兜底、错误转换
+  internal/apperr/     统一错误码与错误分类（唯一来源）
+  internal/values/     跨包共用类型（KeyValue、ClampInt）
+  internal/httptool/   HTTP 请求执行
+  internal/grpctool/   gRPC 反射、动态编解码与调用
+  internal/rpc/        JSON-RPC 分发、方法名登记、参数解码
+  sdk/                 官方 Go SDK 固定副本，非升级任务不要改
+assets/plugin.svg
+```
+
+## 前端规范
+
+- **状态只有一个来源**：所有可变状态在 `src/lib/store.js`，组件只读 `state` store、只调
+  action。不要在组件里直接改数组或写 `plugin.storage`。
+- **宿主访问必须经过 `lib/host.js`**。其他文件出现 `window.dbxPlugin` 视为越界。
+- **纯函数放 `model.js` / `format.js`**：不碰 DOM、不碰宿主，这样能被直接测试。
+- **响应式依赖要显式**：`$derived` 里只能直接引用 props/store。不要把依赖藏在内部
+  `get(state)` 的函数里——那样变更不会触发重算（曾因此出现"新建目录不显示"的 bug）。
+- **store 名不要叫 `state`**：Svelte 5 的 `$state` 是 rune，组件内以 `appState` 引入。
+- **组件只发事件不自作主张**：需要用户输入的流程（保存命名、删除确认）由 `App.svelte`
+  用模态框收集，把结果回传给 action；store 不弹窗。
+- **用户可见文案必须同时提供 `en` 与 `zh`**，写在 `lib/i18n.js`，不要在组件里硬编码中文。
+- **颜色/圆角/字体只用 token**：`var(--color-*)`、`var(--radius-*)`、`var(--font-*)`，
+  禁止写死色值，否则深色主题会坏。
+- **沙箱限制**：没有 Node、直接网络请求、`localStorage`、`navigator.clipboard`。
+  持久化用 `host.createStorage()`，剪贴板用 `host.copy()`。
+- 新增界面区块时优先拆成 `components/` 下的组件，不要让 `App.svelte` 继续变长。
+
+## 后端规范
+
+- **`main.go` 只做装配**。业务逻辑进 `internal/<领域>` 包，禁止在 main 里堆 switch。
+- **错误码只能来自 `internal/apperr`**：参数问题用 `apperr.Invalid`（-32602），
+  执行期/上游失败用 `apperr.Upstream(kind, ...)`（-32000），内部异常用 `apperr.Internal`
+  （-32603）。不要手写数字字面量。
+- **错误必须带 `Kind`**：前端靠 `error.data.kind` 选择排错提示（timeout/tls/dns/
+  connection/auth/reflection）。新增分类要同时更新 `apperr` 与前端 `ERROR_HINT_KEYS`。
+- **新增 RPC 方法三处同步**：`internal/rpc` 里的方法名常量、`Methods()` 列表、`Dispatch`
+  分支；前端 `store.js` 的 `invoke` 第一个参数要一致。`rpc_test.go` 会检查登记与实现是否漂移。
+- **参数校验在边界做完**：非法参数返回 `-32602`，不要让它流到网络层才炸。
+- **stdout 只输出 JSON-RPC**，日志一律 `log.Printf` 走 stderr；不得记录凭据、Token、
+  metadata 值或请求体。
+- **跨包类型放 `internal/values`**，避免各包重复定义 `KeyValue` 造成结构漂移。
+- 插件 ID 固定 `com.jlian.apitester`；改版本时同步 `manifest.json` 与 `backend/main.go`。
 
 ## 验证
 
-- `node --check ui/app.js`
-- `cd backend && GOWORK=../.dbx-dev/go.work go test ./...`
-- 涉及界面或链路时，用 `dbx-plugin dev --path . --port 5190` 手动验证 HTTP 与 gRPC。
-- 改打包配置后执行 `dbx-plugin package .`。
-- 带原生 sidecar 的插件只能在目标平台打包，不要用 `--target` 交叉打包；多平台发布走 `.github/workflows/plugin-release.yml` 的矩阵。
+前端（改 `src/` 或样式后）：
+
+```bash
+npm run build                      # 必须输出 DBX_UI_BUILD_SUCCESS
+npx svelte-check --tsconfig ./jsconfig.json   # 期望 0 errors 0 warnings
+```
+
+后端：
+
+```bash
+cd backend && GOWORK=off go test ./...
+cd backend && GOWORK=off go vet ./...
+```
+
+`AGENTS.md` 早期写的 `GOWORK=../.dbx-dev/go.work` 会因 Go 要求绝对路径而直接失败；
+`go.mod` 已用 `replace ... => ./sdk` 指向本地 SDK，所以 `GOWORK=off` 是正确用法。
+
+链路（涉及界面或宿主交互时）：
+
+```bash
+dbx-plugin dev --path . --port 5190
+```
+
+打开 `http://127.0.0.1:5190/` → 打开工作台 → 手动验证 HTTP / gRPC / 目录树 / 语言 / 主题。
+需要读脱敏日志时用 `/api/diagnostics`。`.dbx-dev/` 含明文开发数据，禁止提交。
+
+打包（改打包配置后）：
+
+```bash
+npm run build                     # 必须先构建，ui/ 不入库且 package 不会自动构建
+dbx-plugin package .
+```
+
+`ui/` 是构建产物，干净检出里不存在；漏掉 `npm run build` 时 `dbx-plugin package` 会报
+`manifest UI entry 'ui/index.html' does not exist`。CI 里由 `plugin-release.yml` 的
+`package-command` 一并执行 `npm ci && npm run build`。
+
+带原生 sidecar 的插件只能在目标平台打包，不要用 `--target` 交叉打包；多平台发布走
+`.github/workflows/plugin-release.yml` 的矩阵。
 
 ## Git 提交
 
 - 只有用户明确要求时才提交。
-- 使用 Conventional Commits：`feat:`、`fix:`、`docs:`、`refactor:`、`test:`、`chore:`；祈使句，标题不超过 72 字符。
+- 使用 Conventional Commits：`feat:`、`fix:`、`docs:`、`refactor:`、`test:`、`chore:`；
+  祈使句，标题不超过 72 字符。
 - 一个提交只做一件事；不要把格式化或重命名和行为修改混在一起。
-- 可选正文说明“为什么”，不要逐行复述 diff；关联 issue 时写 `Refs #123`。
-- 不提交 `dist/`、`.dbx-dev/`、`*.dbxp`、日志或任何密钥；它们应在 `.gitignore` 中。
+- 可选正文说明"为什么"，不要逐行复述 diff；关联 issue 时写 `Refs #123`。
+- 不提交 `dist/`、`.dbx-dev/`、`node_modules/`、`ui/`（构建产物）、`*.dbxp`、日志或密钥。
 - 不 force-push 共享分支，不重写已发布历史。
 - PR 说明写清楚：改了什么、用户可见影响、如何验证。
