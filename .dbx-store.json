@@ -4,10 +4,10 @@
   "icon": "assets/plugin.svg",
   "tags": ["api", "http", "grpc", "testing"],
   "permissions": ["host.storage"],
-  "source": "https://github.com/MosaicAccount/dbx-plugin-api-tester",
+  "source": "https://github.com/MosaicAccount/dbx-plugin-api-tester/tree/v0.1.0",
   "homepage": "https://github.com/MosaicAccount/dbx-plugin-api-tester",
   "license": "MIT",
-  "releaseNotes": "Initial release.",
+  "releaseNotes": "Workbench rebuilt on Svelte 5 with folder-based saved requests; clearer backend error kinds.",
   "localizations": {
     "zh-CN": {
       "name": "API 调试台",
