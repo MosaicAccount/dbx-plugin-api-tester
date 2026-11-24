@@ -40,6 +40,8 @@ backend/
   internal/rpc/        JSON-RPC 分发、方法名登记、参数解码
   sdk/                 官方 Go SDK 固定副本，非升级任务不要改
 docs/grpc-interactive-streaming.md  交互式双向流设计稿（未实现）
+scripts/              发布辅助脚本（不参与打包）
+  backfill-release-sidecars.mjs  Release 缺失 .artifact.json 的补传
 assets/plugin.svg
 ```
 
@@ -93,6 +95,13 @@ cd backend && GOWORK=off go test ./...
 cd backend && GOWORK=off go vet ./...
 ```
 
+发布脚本（改 `scripts/` 后）：
+
+```bash
+npm run test:scripts
+node scripts/backfill-release-sidecars.mjs --tag <tag> --dry-run   # 只读，验证补传计划
+```
+
 `AGENTS.md` 早期写的 `GOWORK=../.dbx-dev/go.work` 会因 Go 要求绝对路径而直接失败；
 `go.mod` 已用 `replace ... => ./sdk` 指向本地 SDK，所以 `GOWORK=off` 是正确用法。
 
@@ -129,7 +138,26 @@ dbx-plugin package .
 - 可选正文说明"为什么"，不要逐行复述 diff；关联 issue 时写 `Refs #123`。
 - 不提交 `dist/`、`.dbx-dev/`、`node_modules/`、`ui/`（构建产物）、`*.dbxp`、日志或密钥。
 - 不 force-push 共享分支，不重写已发布历史。
-- PR 说明写清楚：改了什么、用户可见影响、如何验证。
+- PR 按下面的 `## PR 规范` 提交。
+
+## PR 规范
+
+- **署名只用本人身份**：提交作者和提交者都必须是
+  `MosaicAccount <66773914+MosaicAccount@users.noreply.github.com>`（或 `meetJlian@gmail.com`）。
+  不要自己拼 `xxx@users.noreply.github.com`——拼错会把无关账号绑定成提交者，PR 侧栏凭空多出
+  "2 participants"（曾把 `jlian@users.noreply.github.com` 写进 `dbx-store` 的 PR，结果关联到一个
+  真实存在的陌生人）。提交后用 `git log -1 --format='%an <%ae> | %cn <%ce>'` 核对一遍。
+- **动公共历史前先问**：对公开仓库的 PR 分支 force-push、改写提交、关闭或重开 PR，都先跟用户确认，
+  不要自己决定。
+- **标题**：英文 Conventional Commits，不超过 72 字符，和仓库已有同类 PR 保持一致
+  （如 `chore(automation): register owner/repo for auto-update`）。
+- **正文**：中文，写给维护者看，固定三段「改了什么 / 用户可见影响 / 如何验证」；跨仓库 PR
+  （如 `t8y2/dbx-store`）同样适用。
+- **只写结论，不写过程**：不要出现"我这边跑了…""接着我又验证了…"这类对话或工作日志口吻，也不要把
+  会话里的临时输出整段贴上去。验证命令可以贴，但写在正文里的结论必须是自己复跑过的。
+- **数字必须对得上**：正文里的 `sha256`、`size`、target 数量、版本号发之前逐一核对，核不实就写核不实。
+- **提完自检**：`gh pr view <n> --json changedFiles` 确认只改了预期文件；页面上 participants 只应有本人；
+  CI 状态自己看一遍，红了要能解释原因。
 
 ## 发版与商店
 
@@ -140,8 +168,11 @@ dbx-plugin package .
   （标题 `API Tester vX.Y.Z`，说明用中文写「变化 / 安装 / 校验」）。`plugin-release.yml` 监听
   `release: published`，五个平台各自构建（`darwin-arm64`、`darwin-x64`、`linux-x64`、
   `linux-arm64`、`windows-x64`）；本机不要 `--target` 交叉打包。
-- **Release 资产**：复用 workflow 只上传 `.dbxp` 与 `release-candidates.json`。规范要求的每包
-  `.artifact.json` 需要按已核对的 `sha256`/`size` 补传，或向上游 `t8y2/dbx` 提 workflow 补丁。
+- **Release 资产**：复用 workflow 只上传 `.dbxp` 与 `release-candidates.json`；每包
+  `.artifact.json` 由发布 workflow 之后的 `sidecars` job 自动补传
+  （`scripts/backfill-release-sidecars.mjs`）。补传前会用 `release-candidates.json` 逐项核对
+  已上传包的 `sha256`/`size`，已有的 sidecar 只校验不覆盖。不要手工 `gh release upload` 补，
+  也不要绕过脚本改这两个字段——脚本失败就说明 Release 本身有问题。
 - **`.dbx-store.json` 每版都要改**：商店同步按 Release 的 **tag** 读取该文件，`releaseNotes`
   不会自动跟版本走，`source` 应指向当期 tag。`releaseNotes` 只能写英文基线——`localizations`
   只接受 `name` / `description`，写别的字段会被 `validate.mjs` 拒绝。
@@ -155,5 +186,5 @@ dbx-plugin package .
   或被同步消费就不能移动；只有尚未被消费、且只改不进包的文件（如 `.dbx-store.json`）时，经用户
   确认后才可移动 tag，包字节必须保持不变。移动后 `raw.githubusercontent.com` 有约 5 分钟缓存，
   验证元数据要用 `gh api repos/<owner>/<repo>/contents/...?ref=<tag>` 或等缓存过期。
-- **PR 文案**：标题保留英文 Conventional 前缀，正文一律中文（含跨仓库 PR，如 `dbx-store`），
-  写清「改了什么 / 用户可见影响 / 如何验证」。
+- **PR 文案**：按 `## PR 规范`（英文 Conventional 标题 + 中文三段正文）；跨仓库 PR 如 `dbx-store`
+  同样适用。
