@@ -7,3 +7,9 @@ binary = "dbx-plugin-apitester"
 
 [package]
 include = ["assets", "ui"]
+
+[dev]
+# 前端是 Svelte 5 + Vite，产物写到 ui/。dbx-plugin dev 会在启动前跑 ui_build，
+# 并在 ui_watch 输出 DBX_UI_BUILD_SUCCESS 时自动重载页面。
+ui_build = ["npm", "run", "build"]
+ui_watch = ["npm", "run", "build:watch"]

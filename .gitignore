@@ -1,7 +1,11 @@
 /dist/
 /.dbx-dev/
 /.commandcode/
+/node_modules/
 .dbx-repository-signing-key.env
 .DS_Store
 *.log
 *.dbxp
+
+# Vite 构建产物：由 npm run build 生成，源码在 src/。
+/ui/

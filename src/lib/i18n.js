@@ -1,0 +1,274 @@
+import { writable, derived } from "svelte/store";
+
+/** 支持的语言。新增语言时同步补齐 messages 里的词典。 */
+export const LOCALES = ["en", "zh"];
+
+/**
+ * 文案词典。
+ *
+ * 约定：键名用 camelCase；带插值的文案写成 `{name}` 占位符；两种语言必须同时补齐，
+ * 漏翻译时 t() 会回退到英文，并返回键名兜底。
+ */
+const messages = {
+  en: {
+    appName: "API Tester",
+    tagline: "HTTP & gRPC",
+    saved: "Saved",
+    history: "History",
+    clear: "Clear",
+    newRequest: "New request",
+    save: "Save",
+    saveAs: "Save as",
+    send: "Send",
+    sending: "Sending…",
+    discover: "Discover",
+    discovering: "Discovering…",
+    invoke: "Invoke",
+    params: "Params",
+    headers: "Headers",
+    body: "Body",
+    options: "Options",
+    metadata: "Metadata",
+    message: "Message",
+    response: "Response",
+    copy: "Copy",
+    addParam: "+ Add parameter",
+    addHeader: "+ Add header",
+    addMetadata: "+ Add metadata",
+    none: "None",
+    text: "Text",
+    form: "Form",
+    format: "Format",
+    timeout: "Timeout (ms)",
+    followRedirects: "Follow redirects",
+    skipTls: "Skip TLS verification",
+    tls: "TLS",
+    service: "Service",
+    method: "Method",
+    effectiveUrl: "URL",
+    headerHint: "Content-Type is added automatically for the selected body type.",
+    tlsHint: "Skip TLS verification only for trusted development servers.",
+    metadataHint: "Metadata keys are sent as lowercase gRPC headers, for example authorization.",
+    messageHint: "JSON request body, encoded with the method's protobuf schema.",
+    grpcHint: "Discovery uses gRPC server reflection; the method request type is resolved dynamically.",
+    urlPlaceholder: "https://api.example.com/users",
+    targetPlaceholder: "localhost:50051",
+    untitled: "Untitled request",
+    key: "key",
+    value: "value",
+    enabled: "Include this row",
+    remove: "Remove row",
+    delete: "Delete",
+    requestNameLabel: "Request name",
+    needName: "Enter a request name.",
+    saveAsTitle: "Save request as",
+    create: "Create",
+    savedEmpty: "Nothing saved yet.",
+    historyEmpty: "Requests you send show up here.",
+    storageUnavailable: "Storage is unavailable; saved items only last for this session.",
+    loading: "Sending…",
+    emptyResponse: "No response yet",
+    emptyResponseHint: "Send a request to see the response. Cmd/Ctrl + Enter works too.",
+    needUrl: "Enter a request URL first.",
+    invalidUrl: "The URL must be an absolute http:// or https:// URL.",
+    needTarget: "Enter a gRPC target such as localhost:50051.",
+    needService: "Select a gRPC service first.",
+    needMethod: "Select a gRPC method first.",
+    invalidJson: "The message body is not valid JSON.",
+    savePromptTitle: "Save request",
+    savePromptPlaceholder: "Request name",
+    savedToast: "Saved \"{name}\".",
+    saveFailed: "Could not save the request.",
+    requestTooLarge: "This request is too large to save (storage limit is about 256 KB).",
+    bodyTooLarge: "The request body is too large to send through the plugin host (limit is about 2 MB).",
+    loadFailed: "Could not load the saved request.",
+    deleteTitle: "Delete request",
+    deleteMessage: "Delete \"{name}\"? This cannot be undone.",
+    clearHistoryTitle: "Clear history",
+    clearHistoryMessage: "Remove all history entries?",
+    deletedToast: "Deleted \"{name}\".",
+    historyCleared: "History cleared.",
+    discovered: "Found {count} service(s).",
+    noServices: "No services found. Is server reflection enabled?",
+    cancel: "Cancel",
+    confirm: "Confirm",
+    requestFailed: "Request failed",
+    hintTimeout: "The request timed out. Increase the timeout or check the server.",
+    hintTls: "TLS verification failed. For a development server you can enable Skip TLS verification.",
+    hintConnect: "Could not connect. Check the host, port, and that the server is running.",
+    hintDns: "The host name could not be resolved.",
+    hintReflection: "gRPC reflection is unavailable. Enable server reflection to discover and invoke methods.",
+    hintAuth: "The server rejected the request credentials or metadata.",
+    responseHeaders: "Response headers",
+    trailers: "Trailers",
+    redirects: "Redirects",
+    binaryBody: "Binary body (base64)",
+    emptyBody: "(empty body)",
+    truncated: "The response body was truncated at {size}.",
+    streamTruncated: "The stream was truncated at the display limit.",
+    copyDone: "Copied to the clipboard.",
+    copyFailed: "Could not copy to the clipboard.",
+    nothingToCopy: "There is nothing to copy.",
+    contentTypeHint: "Content-Type: {type}",
+    serverStreaming: "server streaming",
+    clientStreaming: "client streaming",
+    unary: "unary",
+    chooseService: "Discover services first",
+    discoverFirst: "Discover services to list methods",
+    codeLabel: "code {code}",
+    messages: "Messages",
+    truncatedBadge: "truncated",
+    redirectBadge: "{count} redirect(s)",
+    hostUnavailable: "This workbench must run inside DBX.",
+  },
+  zh: {
+    appName: "API 调试台",
+    tagline: "HTTP 与 gRPC",
+    saved: "已保存",
+    history: "历史",
+    clear: "清空",
+    newRequest: "新建请求",
+    save: "保存",
+    saveAs: "另存为",
+    send: "发送",
+    sending: "发送中…",
+    discover: "发现服务",
+    discovering: "发现中…",
+    invoke: "调用",
+    params: "参数",
+    headers: "请求头",
+    body: "请求体",
+    options: "选项",
+    metadata: "元数据",
+    message: "消息",
+    response: "响应",
+    copy: "复制",
+    addParam: "+ 添加参数",
+    addHeader: "+ 添加请求头",
+    addMetadata: "+ 添加元数据",
+    none: "无",
+    text: "文本",
+    form: "表单",
+    format: "格式化",
+    timeout: "超时（毫秒）",
+    followRedirects: "跟随重定向",
+    skipTls: "跳过 TLS 校验",
+    tls: "TLS",
+    service: "服务",
+    method: "方法",
+    effectiveUrl: "URL",
+    headerHint: "按请求体类型自动补充 Content-Type。",
+    tlsHint: "仅在可信的开发服务器上跳过 TLS 校验。",
+    metadataHint: "元数据会以小写 gRPC Header 发送，例如 authorization。",
+    messageHint: "JSON 请求体，按方法的 protobuf 结构编码。",
+    grpcHint: "服务发现依赖 gRPC Server Reflection，请求类型会自动解析。",
+    urlPlaceholder: "https://api.example.com/users",
+    targetPlaceholder: "localhost:50051",
+    untitled: "未命名请求",
+    key: "键",
+    value: "值",
+    enabled: "启用该行",
+    remove: "删除该行",
+    delete: "删除",
+    requestNameLabel: "请求名称",
+    needName: "请输入请求名称。",
+    saveAsTitle: "另存为",
+    create: "创建",
+    savedEmpty: "还没有保存的请求。",
+    historyEmpty: "发送过的请求会出现在这里。",
+    storageUnavailable: "存储不可用，保存内容只在本次会话中有效。",
+    loading: "发送中…",
+    emptyResponse: "还没有响应",
+    emptyResponseHint: "发送请求后在这里查看结果，也可以按 Cmd/Ctrl + Enter。",
+    needUrl: "请先填写请求 URL。",
+    invalidUrl: "URL 必须是完整的 http:// 或 https:// 地址。",
+    needTarget: "请填写 gRPC 目标，例如 localhost:50051。",
+    needService: "请先选择 gRPC 服务。",
+    needMethod: "请先选择 gRPC 方法。",
+    invalidJson: "消息体不是合法的 JSON。",
+    savePromptTitle: "保存请求",
+    savePromptPlaceholder: "请求名称",
+    savedToast: "已保存“{name}”。",
+    saveFailed: "保存请求失败。",
+    requestTooLarge: "请求内容过大，无法保存（存储单值上限约 256 KB）。",
+    bodyTooLarge: "请求体过大，无法通过插件宿主发送（上限约 2 MB）。",
+    loadFailed: "加载已保存请求失败。",
+    deleteTitle: "删除请求",
+    deleteMessage: "确定删除“{name}”？此操作无法撤销。",
+    clearHistoryTitle: "清空历史",
+    clearHistoryMessage: "确定移除所有历史记录？",
+    deletedToast: "已删除“{name}”。",
+    historyCleared: "历史已清空。",
+    discovered: "发现 {count} 个服务。",
+    noServices: "没有发现服务，请确认服务器启用了 Reflection。",
+    cancel: "取消",
+    confirm: "确定",
+    requestFailed: "请求失败",
+    hintTimeout: "请求超时。可以增大超时时间，或检查服务器状态。",
+    hintTls: "TLS 校验失败。开发服务器可以尝试勾选“跳过 TLS 校验”。",
+    hintConnect: "无法建立连接。检查主机、端口以及服务器是否已启动。",
+    hintDns: "无法解析主机名。",
+    hintReflection: "gRPC Reflection 不可用。需要服务端开启 Reflection 才能发现和调用方法。",
+    hintAuth: "服务器拒绝了请求的凭据或元数据。",
+    responseHeaders: "响应头",
+    trailers: "Trailers",
+    redirects: "重定向",
+    binaryBody: "二进制响应（base64）",
+    emptyBody: "（空响应体）",
+    truncated: "响应体在 {size} 处被截断。",
+    streamTruncated: "流式响应达到展示上限，已截断。",
+    copyDone: "已复制到剪贴板。",
+    copyFailed: "复制到剪贴板失败。",
+    nothingToCopy: "没有可复制的内容。",
+    contentTypeHint: "Content-Type：{type}",
+    serverStreaming: "服务端流",
+    clientStreaming: "客户端流",
+    unary: "一元调用",
+    chooseService: "请先发现服务",
+    discoverFirst: "发现服务后可选择方法",
+    codeLabel: "code {code}",
+    messages: "消息",
+    truncatedBadge: "已截断",
+    redirectBadge: "{count} 次重定向",
+    hostUnavailable: "此工作台必须在 DBX 中运行。",
+  },
+};
+
+/** 把宿主 locale 归一化为受支持的语言。 */
+export function detectLocale(value) {
+  return String(value || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+/** 当前语言。 */
+export const locale = writable("en");
+
+/** 取文案的纯函数版本，便于在非组件代码里使用。 */
+export function translate(currentLocale, key, variables) {
+  const dictionary = messages[currentLocale] || messages.en;
+  let value = dictionary[key];
+  if (value === undefined) value = messages.en[key];
+  if (value === undefined) return key;
+  if (variables) {
+    for (const [name, replacement] of Object.entries(variables)) {
+      value = value.split(`{${name}}`).join(String(replacement));
+    }
+  }
+  return value;
+}
+
+/**
+ * 组件里使用的翻译函数。`$t("savedToast", { name })`。
+ * 语言切换时 derived 会自动触发组件重渲染。
+ */
+export const t = derived(locale, ($locale) => (key, variables) => translate($locale, key, variables));
+
+/** 供组件外的状态层读取当前语言下的文案。 */
+export function translator() {
+  /** @type {string} */
+  let current = "en";
+  const unsubscribe = locale.subscribe((value) => {
+    current = value;
+  });
+  unsubscribe();
+  return (key, variables) => translate(current, key, variables);
+}
