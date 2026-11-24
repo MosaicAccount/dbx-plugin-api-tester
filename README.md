@@ -14,7 +14,7 @@
 **gRPC**
 - 基于 Server Reflection 自动发现 service / method
 - 动态 protobuf 编解码，请求消息直接用 JSON 编辑
-- 支持一元调用与服务端流式调用（客户端流、双向流暂不支持）
+- 支持一元、服务端流、客户端流与双向流；流式方法一次发送全部消息，再接收响应
 - Metadata 编辑、TLS、跳过 TLS 校验、超时；展示响应 Metadata 与 Trailers
 
 **工作台**
@@ -57,6 +57,10 @@
 3. 选择 service / method，填写 JSON 请求消息
 4. 点击 **调用**；服务端流式方法会展示多条消息
 
+> 双向流目前是「一次发送、一次接收」：所有消息要在点「调用」之前填好。想按服务端回复
+> 决定下一条发什么的交互式用法尚未实现，设计记录见
+> [docs/grpc-interactive-streaming.md](docs/grpc-interactive-streaming.md)。
+
 ## 项目结构
 
 ```
@@ -85,6 +89,7 @@ backend/
   internal/grpctool/     # gRPC 反射、动态编解码、调用
   internal/rpc/          # JSON-RPC 分发与方法登记
   sdk/                   # 随插件 CLI 0.1.10 分发的 DBX Go SDK（见下）
+docs/                    # 设计记录（交互式双向流尚未实现）
 assets/plugin.svg
 ```
 

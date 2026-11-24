@@ -39,6 +39,7 @@ backend/
   internal/grpctool/   gRPC 反射、动态编解码与调用
   internal/rpc/        JSON-RPC 分发、方法名登记、参数解码
   sdk/                 官方 Go SDK 固定副本，非升级任务不要改
+docs/grpc-interactive-streaming.md  交互式双向流设计稿（未实现）
 assets/plugin.svg
 ```
 
@@ -121,8 +122,9 @@ dbx-plugin package .
 ## Git 提交
 
 - 只有用户明确要求时才提交。
-- 使用 Conventional Commits：`feat:`、`fix:`、`docs:`、`refactor:`、`test:`、`chore:`；
-  祈使句，标题不超过 72 字符。
+- 使用 Conventional Commits，**类型前缀保持英文、冒号后的描述用中文**：
+  `feat:`、`fix:`、`docs:`、`refactor:`、`test:`、`chore:` 等前缀不翻译；
+  描述用祈使句中文，标题整体不超过 72 字符。例如 `fix: 修正客户端流取消后未回收会话`。
 - 一个提交只做一件事；不要把格式化或重命名和行为修改混在一起。
 - 可选正文说明"为什么"，不要逐行复述 diff；关联 issue 时写 `Refs #123`。
 - 不提交 `dist/`、`.dbx-dev/`、`node_modules/`、`ui/`（构建产物）、`*.dbxp`、日志或密钥。
