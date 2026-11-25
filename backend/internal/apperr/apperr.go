@@ -10,6 +10,7 @@ package apperr
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -44,8 +45,15 @@ const (
 	KindAuth       Kind = "auth"
 	KindReflection Kind = "reflection"
 	KindProto      Kind = "proto"
+	KindCanceled   Kind = "canceled"
 	KindInternal   Kind = "internal"
 )
+
+// ErrCanceled 是用户主动终止请求时写入 context 的取消原因。
+//
+// 只靠 context.Canceled 无法区分"用户点了终止"和"内部取消/超时"，
+// 因此用一个独立哨兵值作为 cancel cause，让网络层能给出准确错误分类。
+var ErrCanceled = errors.New("request canceled by user")
 
 // Error 是插件唯一的错误类型。
 //
@@ -96,6 +104,14 @@ func Proto(format string, args ...any) *Error {
 // Upstream 构造上游执行错误。
 func Upstream(kind Kind, format string, args ...any) *Error {
 	return &Error{Code: CodeUpstream, Kind: kind, Message: fmt.Sprintf(format, args...)}
+}
+
+// Canceled 构造用户主动终止请求的错误。
+//
+// 它与超时同属 -32000，但 Kind 不同：前端据此显示"已终止"而不是"请求失败"，
+// 也不该提示用户去检查网络或服务器。
+func Canceled() *Error {
+	return &Error{Code: CodeUpstream, Kind: KindCanceled, Message: "Request canceled"}
 }
 
 // Internal 构造内部错误。

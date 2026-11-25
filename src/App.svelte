@@ -53,12 +53,15 @@
   import GrpcRequestHead from "./components/GrpcRequestHead.svelte";
   import GrpcPanel from "./components/GrpcPanel.svelte";
   import ResponsePanel from "./components/ResponsePanel.svelte";
+  import SettingsDialog from "./components/SettingsDialog.svelte";
   import Modal from "./components/Modal.svelte";
 
   const t = $derived($tStore);
 
   /** 当前模态框请求；null 表示不显示。 */
   let dialog = $state(null);
+  /** 设置弹窗是否打开。 */
+  let settingsOpen = $state(false);
   /** 新建菜单。 */
   let sideMenu = $state(null);
   /** 侧栏拖拽中的请求与指针位置；null 表示没有拖拽。 */
@@ -415,6 +418,9 @@
         </div>
         <div class="topbar-title">{title}</div>
         <div class="topbar-actions">
+          <button class="btn btn-ghost btn-sm" type="button" title={t("settings")} onclick={() => (settingsOpen = true)}>
+            {t("settings")}
+          </button>
           <button
             class="btn btn-ghost btn-sm"
             type="button"
@@ -433,18 +439,34 @@
       <!-- 接口信息（方法 / URL / 目标 / 描述来源）占满整行，下面才是编辑器和响应栏的分栏。 -->
       <div class="request-head">
         {#if $appState.protocol === "http"}
-          <HttpRequestBar {t} http={$appState.http} sending={$appState.sending} />
+          <HttpRequestBar
+            {t}
+            http={$appState.http}
+            sending={$appState.sending}
+            canceling={$appState.canceling}
+          />
         {:else}
-          <GrpcRequestHead {t} grpc={$appState.grpc} sending={$appState.sending} discovering={$appState.discovering} />
+          <GrpcRequestHead
+            {t}
+            grpc={$appState.grpc}
+            sending={$appState.sending}
+            discovering={$appState.discovering}
+            canceling={$appState.canceling}
+          />
         {/if}
       </div>
 
       <div class="workspace" class:is-resizing={resizingSplit} bind:this={workspace} style:--split={$layoutStore.split}>
         <section class="editor">
           {#if $appState.protocol === "http"}
-            <HttpPanel {t} http={$appState.http} />
+            <HttpPanel {t} http={$appState.http} defaultTimeout={$appState.settings.httpTimeoutMs} />
           {:else}
-            <GrpcPanel {t} grpc={$appState.grpc} sending={$appState.sending} />
+            <GrpcPanel
+              {t}
+              grpc={$appState.grpc}
+              sending={$appState.sending}
+              defaultTimeout={$appState.settings.grpcTimeoutMs}
+            />
           {/if}
         </section>
 
@@ -471,6 +493,7 @@
           response={$appState.response}
           responseTab={$appState.responseTab}
           protocol={$appState.protocol}
+          canceling={$appState.canceling}
         />
       </div>
     </main>
@@ -491,6 +514,10 @@
       >
     {/each}
   </div>
+{/if}
+
+{#if settingsOpen}
+  <SettingsDialog {t} settings={$appState.settings} onclose={() => (settingsOpen = false)} />
 {/if}
 
 {#if dialog}

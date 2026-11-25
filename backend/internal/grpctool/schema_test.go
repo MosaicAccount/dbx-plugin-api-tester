@@ -1,6 +1,7 @@
 package grpctool
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -74,7 +75,7 @@ func protoFiles(entries ...string) []ProtoFile {
 
 func TestDiscoverFromProtoFilesDoesNotDial(t *testing.T) {
 	// target 根本不可用；文件模式不应该尝试连接或反射。
-	result, pluginError := Discover(DiscoveryParams{TargetParams: TargetParams{
+	result, pluginError := Discover(context.Background(), DiscoveryParams{TargetParams: TargetParams{
 		Target:        "no-such-host:1",
 		UseProtoFiles: true,
 		ProtoFiles:    protoFiles("demo.proto", demoProto, "common/base.proto", baseProto),
@@ -89,7 +90,7 @@ func TestDiscoverFromProtoFilesDoesNotDial(t *testing.T) {
 }
 
 func TestDescribeMethodsFromProtoFiles(t *testing.T) {
-	result, pluginError := DescribeMethods(MethodsParams{
+	result, pluginError := DescribeMethods(context.Background(), MethodsParams{
 		TargetParams: TargetParams{
 			UseProtoFiles: true,
 			ProtoFiles:    protoFiles("demo.proto", demoProto, "common/base.proto", baseProto),
@@ -131,7 +132,7 @@ service Flat {
   rpc Get(local.common.Page) returns (local.common.Page);
 }
 `
-	result, pluginError := DescribeMethods(MethodsParams{
+	result, pluginError := DescribeMethods(context.Background(), MethodsParams{
 		TargetParams: TargetParams{
 			UseProtoFiles: true,
 			ProtoFiles:    protoFiles("proto/flat.proto", mainProto, "proto/common/base.proto", baseProto),
@@ -149,7 +150,7 @@ service Flat {
 
 func TestInvokeWithProtoFiles(t *testing.T) {
 	target := startHealthServer(t)
-	result, pluginError := Invoke(InvokeParams{
+	result, pluginError := Invoke(context.Background(), InvokeParams{
 		TargetParams: TargetParams{
 			Target:        target,
 			TimeoutMs:     5000,
@@ -224,7 +225,7 @@ func TestProtoFileLimits(t *testing.T) {
 
 func TestDescribeMethodsFromProtoFilesDoesNotDial(t *testing.T) {
 	// 同样是不可达的 target：proto 文件模式的方法解析不应依赖连接。
-	result, pluginError := DescribeMethods(MethodsParams{
+	result, pluginError := DescribeMethods(context.Background(), MethodsParams{
 		TargetParams: TargetParams{
 			Target:        "no-such-host:1",
 			UseProtoFiles: true,
@@ -239,7 +240,7 @@ func TestDescribeMethodsFromProtoFilesDoesNotDial(t *testing.T) {
 		t.Fatalf("unexpected methods: %+v", methods)
 	}
 
-	_, pluginError = DescribeMethods(MethodsParams{
+	_, pluginError = DescribeMethods(context.Background(), MethodsParams{
 		TargetParams: TargetParams{UseProtoFiles: true, ProtoFiles: protoFiles("base.proto", baseProto)},
 		Service:      "local.demo.Greeter",
 	})

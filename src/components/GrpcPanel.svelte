@@ -17,7 +17,15 @@
     setGrpcMessage,
   } from "../lib/store.js";
 
-  let { t, grpc, sending = false } = $props();
+  /**
+   * @type {{
+   *   t: (key: string, variables?: Record<string, unknown>) => string,
+   *   grpc: any,
+   *   sending?: boolean,
+   *   defaultTimeout?: number,
+   * }}
+   */
+  let { t, grpc, sending = false, defaultTimeout = GRPC_TIMEOUT_DEFAULT } = $props();
 
   let tab = $state("metadata");
   /** 消息列表容器：新增消息后用它滚到底部。 */
@@ -102,7 +110,7 @@
   {:else}
     <div class="tab-panel is-active">
       <div class="form-grid">
-        <label class="field">
+        <div class="field">
           <span>{t("timeout")}</span>
           <input
             class="input"
@@ -110,11 +118,15 @@
             min="1"
             max={TIMEOUT_MAX}
             step="1000"
+            aria-label={t("timeout")}
             value={grpc.timeoutMs}
             oninput={(event) =>
               patchGrpc({ timeoutMs: clampNumber(event.currentTarget.value, GRPC_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX) })}
           />
-        </label>
+          <button class="link-btn field-action" type="button" onclick={() => patchGrpc({ timeoutMs: defaultTimeout })}>
+            {t("useDefaultTimeout", { value: defaultTimeout })}
+          </button>
+        </div>
         <label class="check">
           <input
             type="checkbox"
@@ -153,5 +165,18 @@
     margin-top: 12px;
     padding-top: 12px;
     border-top: 1px solid var(--border);
+  }
+
+  .field-action {
+    padding: 0;
+    color: var(--muted);
+    font-size: 11px;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .field-action:hover {
+    color: var(--fg);
+    text-decoration: underline;
   }
 </style>

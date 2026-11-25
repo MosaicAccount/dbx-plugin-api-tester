@@ -21,12 +21,14 @@ import {
   collectFolders,
   defaultGrpc,
   defaultHttp,
+  defaultSettings,
   describeErrorKind,
   enabledEntries,
   errorMessage,
   folderAncestors,
   folderParent,
   normalizeFolder,
+  normalizeSettings,
   requestMethod,
   summarize,
   toSnapshot,
@@ -59,6 +61,8 @@ function createInitialState() {
     activeFolder: "",
     http: defaultHttp(),
     grpc: defaultGrpc(),
+    /** 新建请求使用的默认超时；单个请求可在「选项」里覆盖。 */
+    settings: defaultSettings(),
     savedIndex: [],
     folderIndex: [],
     historyIndex: [],
@@ -66,6 +70,8 @@ function createInitialState() {
     responseTab: "body",
     sending: false,
     discovering: false,
+    /** 已发出终止指令，等 sidecar 收尾。 */
+    canceling: false,
   };
 }
 
@@ -90,6 +96,19 @@ let draftTimer = null;
 let toastTimer = null;
 let splitTimer = null;
 let t = translator();
+
+/**
+ * 当前这次请求。
+ *
+ * sidecar 的取消是按 requestId 定位的，所以「正在跑的是谁」必须和状态分开记。
+ * seq 用来丢弃被终止、或被新请求取代之后才回来的结果。
+ */
+let activeRun = null;
+let runSeq = 0;
+let cancelTimer = null;
+const CANCEL_RPC_TIMEOUT_MS = 5000;
+/** 终止指令发出后最多再等这么久；后端没有收尾也要让界面先退出加载态。 */
+const CANCEL_SETTLE_MS = 8000;
 
 /** 语言切换后刷新状态层使用的翻译函数。 */
 export function refreshTranslator() {
@@ -123,6 +142,23 @@ export function setSplit(value) {
   splitTimer = setTimeout(() => {
     if (storage) void storage.set("layout", { split });
   }, 400);
+}
+
+/** 更新默认超时设置并持久化。 */
+export function updateSettings(patch) {
+  const previous = current().settings;
+  const settings = normalizeSettings({ ...previous, ...patch });
+  update((s) => ({
+    ...s,
+    settings,
+    // 当前请求如果还在用旧默认值（没有单独改过），跟着新默认一起走；
+    // 已经手动覆盖过的请求保持原值，避免"改全局设置把单个请求也改了"。
+    http: s.http.timeoutMs === previous.httpTimeoutMs ? { ...s.http, timeoutMs: settings.httpTimeoutMs } : s.http,
+    grpc: s.grpc.timeoutMs === previous.grpcTimeoutMs ? { ...s.grpc, timeoutMs: settings.grpcTimeoutMs } : s.grpc,
+  }));
+  if (storage) void storage.set("settings", settings);
+  scheduleDraftPersist();
+  return settings;
 }
 
 export function showToast(message, tone) {
@@ -241,13 +277,30 @@ export async function initialize() {
     onWriteFailed: () => showToast(t("storageUnavailable"), "warn"),
   });
 
-  const [savedIndex, folderIndex, historyIndex] = await Promise.all([
+  const [savedIndex, folderIndex, historyIndex, storedSettings, draft] = await Promise.all([
     readIndex("saved.index"),
     readFolders("folder.index"),
     readIndex("history.index"),
+    storage.get("settings"),
+    storage.get("draft"),
   ]);
 
-  update((s) => ({ ...s, ready: true, savedIndex, folderIndex, historyIndex }));
+  const settings = normalizeSettings(storedSettings);
+  update((s) => ({
+    ...s,
+    ready: true,
+    savedIndex,
+    folderIndex,
+    historyIndex,
+    settings,
+    // 没有草稿时，空表单的超时也应该跟着用户设置的默认值走。
+    ...(draft && typeof draft === "object"
+      ? {}
+      : {
+          http: { ...s.http, timeoutMs: settings.httpTimeoutMs },
+          grpc: { ...s.grpc, timeoutMs: settings.grpcTimeoutMs },
+        }),
+  }));
 
   const storedLayout = await storage.get("layout");
   if (storedLayout && typeof storedLayout === "object") {
@@ -255,13 +308,12 @@ export async function initialize() {
     if (Number.isFinite(split)) layout.set({ split: clampSplit(split) });
   }
 
-  const draft = await storage.get("draft");
   if (draft && typeof draft === "object") applySnapshotToState(draft);
 }
 
 /** 把一份快照写入表单状态。 */
 export function applySnapshotToState(snapshot) {
-  const normalized = applySnapshot(snapshot);
+  const normalized = applySnapshot(snapshot, current().settings);
   update((s) => ({
     ...s,
     protocol: normalized.protocol,
@@ -544,8 +596,8 @@ export function newRequest(folder) {
     activeSavedId: null,
     activeName: "",
     activeFolder: target,
-    http: defaultHttp(),
-    grpc: defaultGrpc(),
+    http: defaultHttp(s.settings),
+    grpc: defaultGrpc(s.settings),
     response: null,
     responseTab: "body",
   }));
@@ -877,17 +929,87 @@ export function folderDeleteStats(path) {
 // 发送请求
 // ---------------------------------------------------------------------------
 
-function beginRequest(protocol) {
-  update((s) => ({ ...s, sending: true, response: { protocol, kind: "loading" }, responseTab: "body" }));
+/**
+ * 开始一次请求。
+ *
+ * mode 决定加载态走 sending 还是 discovering；两者互斥，保证同一时间只有一个
+ * 可终止的请求，终止按钮不会定位到错的 requestId。
+ */
+function beginRun(protocol, mode) {
+  runSeq += 1;
+  clearTimeout(cancelTimer);
+  cancelTimer = null;
+  const run = { id: uid(), protocol, mode, seq: runSeq };
+  activeRun = run;
+  update((s) => ({
+    ...s,
+    sending: mode === "send",
+    discovering: mode === "discover",
+    canceling: false,
+    response: { protocol, kind: "loading" },
+    responseTab: "body",
+  }));
+  return run;
 }
 
-function endRequest(response) {
-  update((s) => ({ ...s, sending: false, response }));
+function isCurrentRun(run) {
+  return Boolean(activeRun) && activeRun.seq === run.seq;
+}
+
+/** 收尾一次请求。被终止或被新请求取代的迟到结果在这里被丢弃。 */
+function finishRun(run, response) {
+  if (!isCurrentRun(run)) return;
+  clearTimeout(cancelTimer);
+  cancelTimer = null;
+  activeRun = null;
+  update((s) => ({ ...s, sending: false, discovering: false, canceling: false, response }));
+}
+
+/**
+ * 终止当前请求。
+ *
+ * 取消走另一条 RPC：sidecar 的 JSON-RPC 分发是并发的，因此它能打断正在阻塞的
+ * http/send 或 grpc/invoke。原请求随后会以 canceled 错误返回，由 finishRun 收尾。
+ */
+export async function cancelCurrentRequest() {
+  const run = activeRun;
+  const s = current();
+  if (!run || s.canceling || (!s.sending && !s.discovering) || !host.available) return false;
+
+  update((st) => ({ ...st, canceling: true }));
+  clearTimeout(cancelTimer);
+  cancelTimer = setTimeout(() => {
+    if (!isCurrentRun(run)) return;
+    // 兜底：终止 RPC 或原请求迟迟不返回时也要退出加载态，
+    // 否则"点了终止还是卡住"。迟到结果会因为 activeRun 已清空而被丢弃。
+    activeRun = null;
+    runSeq += 1;
+    update((st) => ({
+      ...st,
+      sending: false,
+      discovering: false,
+      canceling: false,
+      response: { protocol: run.protocol, kind: "error", errorKind: "canceled", error: t("requestCanceled") },
+    }));
+  }, CANCEL_SETTLE_MS);
+
+  try {
+    await host.invoke("request/cancel", { requestId: run.id }, { timeoutMs: CANCEL_RPC_TIMEOUT_MS });
+    return true;
+  } catch (error) {
+    // 请求可能刚好已经结束，此时没必要弹错误；仍然在跑的话让兜底计时器
+    // 继续走，避免终止 RPC 自己失败后又永久停在加载态。
+    if (isCurrentRun(run)) {
+      update((st) => ({ ...st, canceling: false }));
+      showToast(errorMessage(error, t("cancelFailed")), "error");
+    }
+    return false;
+  }
 }
 
 export async function sendHttp() {
   const s = current();
-  if (s.sending || !host.available) return false;
+  if (s.sending || s.discovering || !host.available) return false;
 
   if (!s.http.url.trim()) {
     showToast(t("needUrl"), "warn");
@@ -919,13 +1041,17 @@ export async function sendHttp() {
     skipTlsVerify: Boolean(s.http.skipTlsVerify),
   };
 
-  beginRequest("http");
+  const run = beginRun("http", "send");
   const started = performance.now();
   try {
-    const data = await host.invoke("http/send", params, { timeoutMs: Math.min(118000, timeoutMs + 5000) });
-    endRequest({ protocol: "http", kind: "done", data, elapsedMs: Math.round(performance.now() - started) });
+    const data = await host.invoke(
+      "http/send",
+      { ...params, requestId: run.id },
+      { timeoutMs: Math.min(118000, timeoutMs + 5000) },
+    );
+    finishRun(run, { protocol: "http", kind: "done", data, elapsedMs: Math.round(performance.now() - started) });
   } catch (error) {
-    endRequest({
+    finishRun(run, {
       protocol: "http",
       kind: "error",
       error: errorMessage(error, t("requestFailed")),
@@ -969,9 +1095,13 @@ export async function discoverGrpc() {
     return false;
   }
 
-  update((st) => ({ ...st, discovering: true, response: { protocol: "grpc", kind: "loading" }, responseTab: "body" }));
+  const run = beginRun("grpc", "discover");
   try {
-    const data = await host.invoke("grpc/services", base, { timeoutMs: Math.min(118000, base.timeoutMs + 5000) });
+    const data = await host.invoke(
+      "grpc/services",
+      { ...base, requestId: run.id },
+      { timeoutMs: Math.min(118000, base.timeoutMs + 5000) },
+    );
     const services = Array.isArray(data?.services) ? data.services : [];
     update((st) => {
       const service = services.includes(st.grpc.service) ? st.grpc.service : services[0] || "";
@@ -988,33 +1118,34 @@ export async function discoverGrpc() {
       };
     });
 
-    if (services.length) await loadGrpcMethods();
+    // 方法列表是第二步 RPC；复用同一个 requestId，终止按钮在这两步之间也能命中。
+    if (services.length) await loadGrpcMethods({ requestId: run.id, propagateCancel: true });
 
-    update((st) => ({ ...st, response: null }));
+    finishRun(run, null);
     showToast(
       services.length ? t("discovered", { count: services.length }) : t("noServices"),
       services.length ? "ok" : "warn",
     );
   } catch (error) {
     const message = errorMessage(error, t("requestFailed"));
-    update((st) => ({
-      ...st,
-      response: {
-        protocol: "grpc",
-        kind: "error",
-        error: message,
-        errorKind: describeErrorKind(error),
-      },
-    }));
+    const kind = describeErrorKind(error);
+    finishRun(run, { protocol: "grpc", kind: "error", error: message, errorKind: kind });
+    if (kind === "canceled") showToast(t("requestCanceled"), "warn");
     // proto 语法错误、缺少 import 等只出现在这里，用提示条保证用户不会漏看。
-    showToast(truncate(message, 180), "error");
+    else showToast(truncate(message, 180), "error");
   } finally {
-    update((st) => ({ ...st, discovering: false }));
     scheduleDraftPersist();
   }
   return true;
 }
 
+/**
+ * 加载服务的方法列表。
+ *
+ * options.requestId：由 discoverGrpc 传入时可被终止；为 undefined 时（打开请求后的
+ * 静默补齐）不参与终止，避免抢走正在发送的请求的取消目标。
+ * options.propagateCancel：为 true 时把"已终止"抛给调用方收尾，而不是在这里静默吞掉。
+ */
 export async function loadGrpcMethods(options = {}) {
   const s = current();
   if (!s.grpc.service || !host.available) return;
@@ -1024,7 +1155,7 @@ export async function loadGrpcMethods(options = {}) {
   try {
     const data = await host.invoke(
       "grpc/methods",
-      { ...base, service: s.grpc.service },
+      { ...base, service: s.grpc.service, ...(options.requestId ? { requestId: options.requestId } : {}) },
       { timeoutMs: Math.min(118000, base.timeoutMs + 5000) },
     );
     // 加载期间用户可能已经切到另一个请求，旧请求的结果不能写到新请求上。
@@ -1032,15 +1163,17 @@ export async function loadGrpcMethods(options = {}) {
     setGrpcMethods(Array.isArray(data?.methods) ? data.methods : []);
   } catch (error) {
     if (grpcIdentity(current()) !== identity) return;
+    const kind = describeErrorKind(error);
+    if (kind === "canceled" && options.propagateCancel) throw error;
     setGrpcMethods([]);
-    if (!options.silent) showToast(errorMessage(error, t("requestFailed")), "error");
+    if (!options.silent && kind !== "canceled") showToast(errorMessage(error, t("requestFailed")), "error");
   }
 }
 
 let grpcInvokeBusy = false;
 
 export async function invokeGrpc() {
-  // 方法补齐在 beginRequest 之前，必须自己挡重复点击，否则一次快速双击会发两次调用。
+  // 方法补齐在 beginRun 之前，必须自己挡重复点击，否则一次快速双击会发两次调用。
   if (grpcInvokeBusy) return false;
   grpcInvokeBusy = true;
   try {
@@ -1108,17 +1241,17 @@ async function invokeGrpcInternal() {
   }
 
   const payload = toSnapshot(s);
-  beginRequest("grpc");
+  const run = beginRun("grpc", "send");
   const started = performance.now();
   try {
     const data = await host.invoke(
       "grpc/invoke",
-      { ...base, service: s.grpc.service, method: s.grpc.method, messages },
+      { ...base, service: s.grpc.service, method: s.grpc.method, messages, requestId: run.id },
       { timeoutMs: Math.min(118000, base.timeoutMs + 5000) },
     );
-    endRequest({ protocol: "grpc", kind: "done", data, elapsedMs: Math.round(performance.now() - started) });
+    finishRun(run, { protocol: "grpc", kind: "done", data, elapsedMs: Math.round(performance.now() - started) });
   } catch (error) {
-    endRequest({
+    finishRun(run, {
       protocol: "grpc",
       kind: "error",
       error: errorMessage(error, t("requestFailed")),

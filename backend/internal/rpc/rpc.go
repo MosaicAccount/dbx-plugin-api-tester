@@ -8,26 +8,31 @@
 package rpc
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/jlian/dbx-plugin-api-tester/internal/apperr"
 	"github.com/jlian/dbx-plugin-api-tester/internal/grpctool"
 	"github.com/jlian/dbx-plugin-api-tester/internal/httptool"
+	"github.com/jlian/dbx-plugin-api-tester/internal/inflight"
 )
 
 // 全部对外方法名。前端 src/lib/store.js 里 invoke 的第一个参数与之对应。
 const (
-	MethodPing         = "api/ping"
-	MethodHTTPSend     = "http/send"
-	MethodGRPCServices = "grpc/services"
-	MethodGRPCMethods  = "grpc/methods"
-	MethodGRPCInvoke   = "grpc/invoke"
+	MethodPing          = "api/ping"
+	MethodHTTPSend      = "http/send"
+	MethodRequestCancel = "request/cancel"
+	MethodGRPCServices  = "grpc/services"
+	MethodGRPCMethods   = "grpc/methods"
+	MethodGRPCInvoke    = "grpc/invoke"
 )
 
 // Methods 返回已实现的方法列表，供 ping 自检与文档使用。
 func Methods() []string {
 	return []string{
 		MethodHTTPSend,
+		MethodRequestCancel,
 		MethodGRPCServices,
 		MethodGRPCMethods,
 		MethodGRPCInvoke,
@@ -45,22 +50,28 @@ type PingResult struct {
 // 编译期确认各处理器的错误类型与分发层一致。
 // 若某个包改了返回类型，这里会直接编译失败，而不是等到运行时才暴露。
 var (
-	_ func(httptool.SendParams) (*httptool.SendResult, *apperr.Error) = httptool.Send
-	_ func(grpctool.DiscoveryParams) (any, *apperr.Error)             = grpctool.Discover
-	_ func(grpctool.MethodsParams) (any, *apperr.Error)               = grpctool.DescribeMethods
-	_ func(grpctool.InvokeParams) (any, *apperr.Error)                = grpctool.Invoke
+	_ func(context.Context, httptool.SendParams) (*httptool.SendResult, *apperr.Error) = httptool.Send
+	_ func(context.Context, grpctool.DiscoveryParams) (any, *apperr.Error)             = grpctool.Discover
+	_ func(context.Context, grpctool.MethodsParams) (any, *apperr.Error)               = grpctool.DescribeMethods
+	_ func(context.Context, grpctool.InvokeParams) (any, *apperr.Error)                = grpctool.Invoke
 )
+
+// CancelResult 是 request/cancel 的返回结构。
+type CancelResult struct {
+	Canceled bool `json:"canceled"`
+}
 
 // Handler 持有分发所需的依赖。
 type Handler struct {
-	id      string
-	version string
+	id       string
+	version  string
+	inflight *inflight.Registry
 }
 
 // New 构造分发器。id 与 version 必须与 manifest.json 一致，
 // 否则宿主会以 "Sidecar identity does not match manifest" 拒绝启动。
 func New(id, version string) *Handler {
-	return &Handler{id: id, version: version}
+	return &Handler{id: id, version: version, inflight: inflight.New()}
 }
 
 // Dispatch 把一次调用路由到具体实现。
@@ -70,36 +81,87 @@ func (h *Handler) Dispatch(method string, params json.RawMessage) (any, *apperr.
 		return &PingResult{OK: true, ID: h.id, Version: h.version, Methods: Methods()}, nil
 
 	case MethodHTTPSend:
-		var request httptool.SendParams
+		var request struct {
+			httptool.SendParams
+			RequestID string `json:"requestId"`
+		}
 		if err := decode(params, &request); err != nil {
 			return nil, err
 		}
-		return httptool.Send(request)
+		ctx, release, failure := h.begin(request.RequestID)
+		if failure != nil {
+			return nil, failure
+		}
+		defer release()
+		return httptool.Send(ctx, request.SendParams)
+
+	case MethodRequestCancel:
+		var request struct {
+			RequestID string `json:"requestId"`
+		}
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		id := strings.TrimSpace(request.RequestID)
+		if id == "" {
+			return nil, apperr.Invalid("requestId is required")
+		}
+		return &CancelResult{Canceled: h.inflight.Cancel(id)}, nil
 
 	case MethodGRPCServices:
-		var request grpctool.DiscoveryParams
+		var request struct {
+			grpctool.DiscoveryParams
+			RequestID string `json:"requestId"`
+		}
 		if err := decode(params, &request); err != nil {
 			return nil, err
 		}
-		return grpctool.Discover(request)
+		ctx, release, failure := h.begin(request.RequestID)
+		if failure != nil {
+			return nil, failure
+		}
+		defer release()
+		return grpctool.Discover(ctx, request.DiscoveryParams)
 
 	case MethodGRPCMethods:
-		var request grpctool.MethodsParams
+		var request struct {
+			grpctool.MethodsParams
+			RequestID string `json:"requestId"`
+		}
 		if err := decode(params, &request); err != nil {
 			return nil, err
 		}
-		return grpctool.DescribeMethods(request)
+		ctx, release, failure := h.begin(request.RequestID)
+		if failure != nil {
+			return nil, failure
+		}
+		defer release()
+		return grpctool.DescribeMethods(ctx, request.MethodsParams)
 
 	case MethodGRPCInvoke:
-		var request grpctool.InvokeParams
+		var request struct {
+			grpctool.InvokeParams
+			RequestID string `json:"requestId"`
+		}
 		if err := decode(params, &request); err != nil {
 			return nil, err
 		}
-		return grpctool.Invoke(request)
+		ctx, release, failure := h.begin(request.RequestID)
+		if failure != nil {
+			return nil, failure
+		}
+		defer release()
+		return grpctool.Invoke(ctx, request.InvokeParams)
 
 	default:
 		return nil, apperr.MethodNotFound(method)
 	}
+}
+
+// begin 为一次可取消调用建立上下文。requestId 为空时退化为不可取消，
+// 旧版前端不传这个字段也能继续工作。
+func (h *Handler) begin(requestID string) (context.Context, func(), *apperr.Error) {
+	return h.inflight.Begin(strings.TrimSpace(requestID))
 }
 
 // decode 把 params 解成强类型结构。

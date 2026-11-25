@@ -7,9 +7,9 @@
    */
   import SelectMenu from "./SelectMenu.svelte";
   import { HTTP_METHODS } from "../lib/model.js";
-  import { patchHttp, sendHttp } from "../lib/store.js";
+  import { cancelCurrentRequest, patchHttp, sendHttp } from "../lib/store.js";
 
-  let { t, http, sending = false } = $props();
+  let { t, http, sending = false, canceling = false } = $props();
 
   const methodItems = $derived(
     [...new Set([...HTTP_METHODS, http.method])].map((method) => ({ value: method, label: method })),
@@ -34,10 +34,23 @@
     onkeydown={(event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
-      void sendHttp();
+      if (!sending) void sendHttp();
     }}
   />
-  <button class="btn btn-primary" type="button" disabled={sending} onclick={() => void sendHttp()}>
-    {sending ? t("sending") : t("send")}
-  </button>
+  {#if sending}
+    <!-- 请求可能长时间没有响应：发送中的按钮位置换成终止，避免误点重复发送。 -->
+    <button
+      class="btn btn-danger"
+      type="button"
+      title={t("stop")}
+      disabled={canceling}
+      onclick={() => void cancelCurrentRequest()}
+    >
+      {canceling ? t("stopping") : t("stop")}
+    </button>
+  {:else}
+    <button class="btn btn-primary" type="button" onclick={() => void sendHttp()}>
+      {t("send")}
+    </button>
+  {/if}
 </div>

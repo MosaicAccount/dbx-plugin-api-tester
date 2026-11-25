@@ -1,6 +1,7 @@
 package httptool
 
 import (
+	"context"
 	"encoding/base64"
 	"io"
 	"net/http"
@@ -22,7 +23,7 @@ func TestSendHTTPGet(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, pluginError := Send(SendParams{Method: "GET", URL: server.URL})
+	result, pluginError := Send(context.Background(), SendParams{Method: "GET", URL: server.URL})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
@@ -48,7 +49,7 @@ func TestSendHTTPPostBodyAndHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, pluginError := Send(SendParams{
+	result, pluginError := Send(context.Background(), SendParams{
 		Method:       "post",
 		URL:          server.URL,
 		Headers:      []values.KeyValue{{Name: "X-Custom", Value: "abc"}},
@@ -71,7 +72,7 @@ func TestSendHTTPBase64Body(t *testing.T) {
 	defer server.Close()
 
 	payload := []byte{0, 1, 2, 3, 254, 255}
-	result, pluginError := Send(SendParams{
+	result, pluginError := Send(context.Background(), SendParams{
 		Method:       "PUT",
 		URL:          server.URL,
 		BodyBase64:   base64.StdEncoding.EncodeToString(payload),
@@ -93,7 +94,7 @@ func TestSendHTTPBinaryResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, pluginError := Send(SendParams{Method: "GET", URL: server.URL})
+	result, pluginError := Send(context.Background(), SendParams{Method: "GET", URL: server.URL})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
@@ -117,7 +118,7 @@ func TestSendHTTPRedirects(t *testing.T) {
 	defer server.Close()
 
 	follow := true
-	result, pluginError := Send(SendParams{Method: "GET", URL: server.URL + "/redirect", FollowRedirects: &follow})
+	result, pluginError := Send(context.Background(), SendParams{Method: "GET", URL: server.URL + "/redirect", FollowRedirects: &follow})
 	if pluginError != nil {
 		t.Fatalf("unexpected error when following redirects: %v", pluginError)
 	}
@@ -129,7 +130,7 @@ func TestSendHTTPRedirects(t *testing.T) {
 	}
 
 	noFollow := false
-	result, pluginError = Send(SendParams{Method: "GET", URL: server.URL + "/redirect", FollowRedirects: &noFollow})
+	result, pluginError = Send(context.Background(), SendParams{Method: "GET", URL: server.URL + "/redirect", FollowRedirects: &noFollow})
 	if pluginError != nil {
 		t.Fatalf("unexpected error without redirects: %v", pluginError)
 	}
@@ -145,7 +146,7 @@ func TestSendHTTPTruncatesLargeBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, pluginError := Send(SendParams{Method: "GET", URL: server.URL, MaxBodyBytes: 1024})
+	result, pluginError := Send(context.Background(), SendParams{Method: "GET", URL: server.URL, MaxBodyBytes: 1024})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
@@ -161,12 +162,38 @@ func TestSendHTTPTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, pluginError := Send(SendParams{Method: "GET", URL: server.URL, TimeoutMs: 50})
+	_, pluginError := Send(context.Background(), SendParams{Method: "GET", URL: server.URL, TimeoutMs: 50})
 	if pluginError == nil {
 		t.Fatal("expected a timeout error")
 	}
 	if pluginError.Kind != apperr.KindTimeout {
 		t.Fatalf("expected timeout kind, got %q", pluginError.Kind)
+	}
+	if pluginError.Code != apperr.CodeUpstream {
+		t.Fatalf("expected upstream code, got %d", pluginError.Code)
+	}
+}
+
+// 用户点终止时，错误分类必须是 canceled 而不是 timeout：
+// 前端据此显示"已终止"，也不该提示去检查网络或加大超时。
+func TestSendHTTPCanceledByUser(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		<-release
+		_, _ = writer.Write([]byte("late"))
+	}))
+	defer server.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	time.AfterFunc(50*time.Millisecond, func() { cancel(apperr.ErrCanceled) })
+
+	_, pluginError := Send(ctx, SendParams{Method: "GET", URL: server.URL, TimeoutMs: 5000})
+	if pluginError == nil {
+		t.Fatal("expected the request to be canceled")
+	}
+	if pluginError.Kind != apperr.KindCanceled {
+		t.Fatalf("expected canceled kind, got %q (%s)", pluginError.Kind, pluginError.Message)
 	}
 	if pluginError.Code != apperr.CodeUpstream {
 		t.Fatalf("expected upstream code, got %d", pluginError.Code)
@@ -183,7 +210,7 @@ func TestSendHTTPValidation(t *testing.T) {
 		{Method: "GET", URL: "http://example.com", Headers: []values.KeyValue{{Name: "Bad Name", Value: "x"}}},
 	}
 	for index, params := range cases {
-		if _, pluginError := Send(params); pluginError == nil {
+		if _, pluginError := Send(context.Background(), params); pluginError == nil {
 			t.Fatalf("case %d should be rejected", index)
 		}
 	}

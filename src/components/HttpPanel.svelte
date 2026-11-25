@@ -19,7 +19,14 @@
   } from "../lib/model.js";
   import { patchHttp, showToast } from "../lib/store.js";
 
-  let { t, http } = $props();
+  /**
+   * @type {{
+   *   t: (key: string, variables?: Record<string, unknown>) => string,
+   *   http: any,
+   *   defaultTimeout?: number,
+   * }}
+   */
+  let { t, http, defaultTimeout = HTTP_TIMEOUT_DEFAULT } = $props();
 
   let tab = $state("params");
 
@@ -113,7 +120,7 @@
   {:else}
     <div class="tab-panel is-active">
       <div class="form-grid">
-        <label class="field">
+        <div class="field">
           <span>{t("timeout")}</span>
           <input
             class="input"
@@ -121,11 +128,15 @@
             min="1"
             max={TIMEOUT_MAX}
             step="1000"
+            aria-label={t("timeout")}
             value={http.timeoutMs}
             oninput={(event) =>
               patchHttp({ timeoutMs: clampNumber(event.currentTarget.value, HTTP_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX) })}
           />
-        </label>
+          <button class="link-btn field-action" type="button" onclick={() => patchHttp({ timeoutMs: defaultTimeout })}>
+            {t("useDefaultTimeout", { value: defaultTimeout })}
+          </button>
+        </div>
         <label class="check">
           <input
             type="checkbox"
@@ -151,5 +162,18 @@
 <style>
   .grow {
     flex: 1;
+  }
+
+  .field-action {
+    padding: 0;
+    color: var(--muted);
+    font-size: 11px;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .field-action:hover {
+    color: var(--fg);
+    text-decoration: underline;
   }
 </style>

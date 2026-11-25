@@ -16,6 +16,7 @@
   } from "../lib/model.js";
   import {
     addGrpcProtoFiles,
+    cancelCurrentRequest,
     discoverGrpc,
     invokeGrpc,
     loadGrpcMethods,
@@ -27,7 +28,7 @@
     showToast,
   } from "../lib/store.js";
 
-  let { t, grpc, sending = false, discovering = false } = $props();
+  let { t, grpc, sending = false, discovering = false, canceling = false } = $props();
 
   /** 隐藏的文件选择器，宿主没有 fileTransfer 时的降级路径。 */
   let fileInput = $state(null);
@@ -239,12 +240,37 @@
       <input type="checkbox" checked={Boolean(grpc.tls)} onchange={(event) => onTlsChange(event.currentTarget.checked)} />
       <span>{t("tls")}</span>
     </label>
-    <button class="btn btn-secondary" type="button" disabled={sending || discovering} onclick={() => void discoverGrpc()}>
-      {discovering ? t("discovering") : fileMode ? t("parseProto") : t("discover")}
-    </button>
-    <button class="btn btn-primary" type="button" disabled={sending || discovering} onclick={() => void invokeGrpc()}>
-      {t("invoke")}
-    </button>
+    {#if discovering}
+      <!-- 反射/解析同样可能长时间没有响应，发现中也允许终止。 -->
+      <button
+        class="btn btn-danger"
+        type="button"
+        title={t("stop")}
+        disabled={canceling}
+        onclick={() => void cancelCurrentRequest()}
+      >
+        {canceling ? t("stopping") : t("stop")}
+      </button>
+    {:else}
+      <button class="btn btn-secondary" type="button" disabled={sending} onclick={() => void discoverGrpc()}>
+        {fileMode ? t("parseProto") : t("discover")}
+      </button>
+    {/if}
+    {#if sending}
+      <button
+        class="btn btn-danger"
+        type="button"
+        title={t("stop")}
+        disabled={canceling}
+        onclick={() => void cancelCurrentRequest()}
+      >
+        {canceling ? t("stopping") : t("stop")}
+      </button>
+    {:else}
+      <button class="btn btn-primary" type="button" disabled={discovering} onclick={() => void invokeGrpc()}>
+        {t("invoke")}
+      </button>
+    {/if}
   </div>
 
   <div class="grpc-schema">

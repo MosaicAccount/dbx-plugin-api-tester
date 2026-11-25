@@ -84,7 +84,7 @@ func payloadMessage(size int) json.RawMessage {
 
 func TestInvokeGRPCClientStreaming(t *testing.T) {
 	target := startStreamingServer(t)
-	result, pluginError := Invoke(InvokeParams{
+	result, pluginError := Invoke(context.Background(), InvokeParams{
 		TargetParams: TargetParams{Target: target, TimeoutMs: 10000},
 		Service:      streamingService,
 		Method:       "StreamingInputCall",
@@ -117,7 +117,7 @@ func TestInvokeGRPCClientStreaming(t *testing.T) {
 
 func TestInvokeGRPCBidiStreaming(t *testing.T) {
 	target := startStreamingServer(t)
-	result, pluginError := Invoke(InvokeParams{
+	result, pluginError := Invoke(context.Background(), InvokeParams{
 		TargetParams: TargetParams{Target: target, TimeoutMs: 10000},
 		Service:      streamingService,
 		Method:       "FullDuplexCall",
@@ -154,7 +154,7 @@ func TestInvokeGRPCBidiLargePayloadDoesNotStall(t *testing.T) {
 		messages = append(messages, payloadMessage(256*1024))
 	}
 
-	result, pluginError := Invoke(InvokeParams{
+	result, pluginError := Invoke(context.Background(), InvokeParams{
 		TargetParams: TargetParams{Target: target, TimeoutMs: 10000},
 		Service:      streamingService,
 		Method:       "FullDuplexCall",
@@ -176,7 +176,7 @@ func TestInvokeGRPCStreamingValidation(t *testing.T) {
 	target := startStreamingServer(t)
 
 	// 一元方法带多条消息属于调用方错误，应在发到网络层之前拒绝。
-	if _, pluginError := Invoke(InvokeParams{
+	if _, pluginError := Invoke(context.Background(), InvokeParams{
 		TargetParams: TargetParams{Target: target, TimeoutMs: 5000},
 		Service:      streamingService,
 		Method:       "EmptyCall",
@@ -186,7 +186,7 @@ func TestInvokeGRPCStreamingValidation(t *testing.T) {
 	}
 
 	// 单条 message 的旧参数形式必须继续可用。
-	if _, pluginError := Invoke(InvokeParams{
+	if _, pluginError := Invoke(context.Background(), InvokeParams{
 		TargetParams: TargetParams{Target: target, TimeoutMs: 5000},
 		Service:      streamingService,
 		Method:       "EmptyCall",
@@ -200,7 +200,7 @@ func TestInvokeGRPCStreamingValidation(t *testing.T) {
 	for index := range many {
 		many[index] = json.RawMessage(`{}`)
 	}
-	if _, pluginError := Invoke(InvokeParams{
+	if _, pluginError := Invoke(context.Background(), InvokeParams{
 		TargetParams: TargetParams{Target: target, TimeoutMs: 5000},
 		Service:      streamingService,
 		Method:       "FullDuplexCall",

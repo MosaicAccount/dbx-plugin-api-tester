@@ -44,7 +44,7 @@ export function blankKV() {
   return { name: "", value: "", enabled: true };
 }
 
-export function defaultHttp() {
+export function defaultHttp(settings) {
   return {
     method: "GET",
     url: "",
@@ -52,13 +52,13 @@ export function defaultHttp() {
     headers: [blankKV()],
     bodyType: "none",
     bodyText: "",
-    timeoutMs: HTTP_TIMEOUT_DEFAULT,
+    timeoutMs: clampNumber(settings?.httpTimeoutMs, HTTP_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX),
     followRedirects: true,
     skipTlsVerify: false,
   };
 }
 
-export function defaultGrpc() {
+export function defaultGrpc(settings) {
   return {
     target: "",
     tls: false,
@@ -73,9 +73,23 @@ export function defaultGrpc() {
     // 统一成数组后，切换方法类型不需要重排请求体。
     // 空白保持空字符串，让编辑器显示"输入 JSON 消息"的占位提示，而不是看起来像真实内容的 {}。
     messages: [""],
-    timeoutMs: GRPC_TIMEOUT_DEFAULT,
+    timeoutMs: clampNumber(settings?.grpcTimeoutMs, GRPC_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX),
     services: [],
     methods: [],
+  };
+}
+
+/** 默认超时偏好：新建请求使用它，单个请求仍可在「选项」里覆盖。 */
+export function defaultSettings() {
+  return { httpTimeoutMs: HTTP_TIMEOUT_DEFAULT, grpcTimeoutMs: GRPC_TIMEOUT_DEFAULT };
+}
+
+/** 归一化持久化的超时设置；缺失或非法值回落到内置默认。 */
+export function normalizeSettings(value) {
+  const settings = value && typeof value === "object" ? value : {};
+  return {
+    httpTimeoutMs: clampNumber(settings.httpTimeoutMs, HTTP_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX),
+    grpcTimeoutMs: clampNumber(settings.grpcTimeoutMs, GRPC_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX),
   };
 }
 
@@ -281,12 +295,17 @@ export function statusTone(value) {
  *
  * 草稿、已保存请求和历史记录都走这里，保证反序列化时的容错规则只有一份：
  * 字段缺失或类型不对时回落到默认值，而不是把坏数据塞进表单。
+ *
+ * @param {any} snapshot
+ * @param {{ httpTimeoutMs?: number, grpcTimeoutMs?: number }} [settings]
+ *   用户设置的默认超时；旧快照没有 timeoutMs 时用它补齐。
  */
-export function applySnapshot(snapshot) {
+export function applySnapshot(snapshot, settings) {
+  const defaults = normalizeSettings(settings);
   const next = {
     protocol: "http",
-    http: defaultHttp(),
-    grpc: defaultGrpc(),
+    http: defaultHttp(defaults),
+    grpc: defaultGrpc(defaults),
     responseTab: "body",
   };
   if (!snapshot || typeof snapshot !== "object") return next;
@@ -295,14 +314,14 @@ export function applySnapshot(snapshot) {
 
   const http = snapshot.http && typeof snapshot.http === "object" ? snapshot.http : {};
   next.http = {
-    ...defaultHttp(),
+    ...defaultHttp(defaults),
     bodyType: typeof http.bodyType === "string" ? http.bodyType : "none",
     method: typeof http.method === "string" && http.method.trim() ? http.method.trim().toUpperCase() : "GET",
     url: typeof http.url === "string" ? http.url : "",
     bodyText: typeof http.bodyText === "string" ? http.bodyText : "",
     params: normalizeKV(http.params),
     headers: normalizeKV(http.headers),
-    timeoutMs: clampNumber(http.timeoutMs, HTTP_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX),
+    timeoutMs: clampNumber(http.timeoutMs, defaults.httpTimeoutMs, 1, TIMEOUT_MAX),
     followRedirects: http.followRedirects !== false,
     skipTlsVerify: Boolean(http.skipTlsVerify),
   };
@@ -310,7 +329,7 @@ export function applySnapshot(snapshot) {
 
   const grpc = snapshot.grpc && typeof snapshot.grpc === "object" ? snapshot.grpc : {};
   next.grpc = {
-    ...defaultGrpc(),
+    ...defaultGrpc(defaults),
     target: typeof grpc.target === "string" ? grpc.target : "",
     service: typeof grpc.service === "string" ? grpc.service : "",
     method: typeof grpc.method === "string" ? grpc.method : "",
@@ -318,7 +337,7 @@ export function applySnapshot(snapshot) {
     protoFiles: normalizeGrpcProtoFiles(grpc.protoFiles),
     metadata: normalizeKV(grpc.metadata),
     messages: normalizeGrpcMessages(grpc),
-    timeoutMs: clampNumber(grpc.timeoutMs, GRPC_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX),
+    timeoutMs: clampNumber(grpc.timeoutMs, defaults.grpcTimeoutMs, 1, TIMEOUT_MAX),
     tls: Boolean(grpc.tls),
     skipTlsVerify: Boolean(grpc.skipTlsVerify),
   };
@@ -476,6 +495,7 @@ export function describeErrorKind(error) {
   if (typeof kind === "string" && kind) return kind;
   const text = String(error?.message || error || "").toLowerCase();
   if (!text) return "";
+  if (text.includes("canceled") || text.includes("cancelled")) return "canceled";
   if (text.includes("timed out") || text.includes("timeout") || text.includes("deadline")) return "timeout";
   if (text.includes("certificate") || text.includes("x509") || text.includes("tls") || text.includes("handshake")) return "tls";
   if (text.includes("reflection")) return "reflection";
@@ -487,6 +507,7 @@ export function describeErrorKind(error) {
 
 /** 错误分类到文案键的映射，与 i18n 词典保持一致。 */
 export const ERROR_HINT_KEYS = {
+  canceled: "hintCanceled",
   timeout: "hintTimeout",
   tls: "hintTls",
   reflection: "hintReflection",

@@ -110,19 +110,25 @@ type InvokeResult struct {
 	Messages    []string   `json:"messages,omitempty"`
 	Streaming   bool       `json:"streaming,omitempty"`
 	// StreamKind 取 client / server / bidi，让界面能显示准确的流类型。
-	StreamKind string            `json:"streamKind,omitempty"`
-	Truncated  bool              `json:"truncated,omitempty"`
-	Metadata   []common.KeyValue `json:"metadata"`
-	Trailers   []common.KeyValue `json:"trailers"`
-	ElapsedMs  int64             `json:"elapsedMs"`
-	SizeBytes  int               `json:"sizeBytes"`
+	StreamKind string `json:"streamKind,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
+	// Canceled 表示这次调用是用户主动终止的。为 true 时 Messages 里保留
+	// 终止前已经收到的响应，界面可以展示"终止前收到了什么"。
+	Canceled  bool              `json:"canceled,omitempty"`
+	Metadata  []common.KeyValue `json:"metadata"`
+	Trailers  []common.KeyValue `json:"trailers"`
+	ElapsedMs int64             `json:"elapsedMs"`
+	SizeBytes int               `json:"sizeBytes"`
 }
 
 // Discover 列出目标服务端可用的 gRPC 服务。
 //
 // 导入了 proto 文件时直接从本地描述符里列服务，不再要求服务端开启 Reflection。
-func Discover(params DiscoveryParams) (any, *apperr.Error) {
+func Discover(ctx context.Context, params DiscoveryParams) (any, *apperr.Error) {
 	started := time.Now()
+	if pluginError := canceledByUser(ctx); pluginError != nil {
+		return nil, pluginError
+	}
 	if params.UseProtoFiles {
 		schema, pluginError := loadProtoSchema(params.ProtoFiles)
 		if pluginError != nil {
@@ -141,7 +147,7 @@ func Discover(params DiscoveryParams) (any, *apperr.Error) {
 	}
 	defer connection.Close()
 
-	ctx, cancel, pluginError := grpcContext(params.TimeoutMs, params.Metadata)
+	ctx, cancel, pluginError := grpcContext(ctx, params.TimeoutMs, params.Metadata)
 	if pluginError != nil {
 		return nil, pluginError
 	}
@@ -149,6 +155,9 @@ func Discover(params DiscoveryParams) (any, *apperr.Error) {
 
 	services, err := listServices(ctx, connection)
 	if err != nil {
+		if pluginError := canceledByUser(ctx); pluginError != nil {
+			return nil, pluginError
+		}
 		return nil, grpcReflectionError(err)
 	}
 	visible := make([]string, 0, len(services))
@@ -166,13 +175,16 @@ func Discover(params DiscoveryParams) (any, *apperr.Error) {
 }
 
 // DescribeMethods 列出某个服务的全部方法签名。
-func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
+func DescribeMethods(ctx context.Context, params MethodsParams) (any, *apperr.Error) {
 	serviceName := strings.TrimSpace(params.Service)
 	if serviceName == "" {
 		return nil, apperr.Invalid("Service name is required")
 	}
 
 	started := time.Now()
+	if pluginError := canceledByUser(ctx); pluginError != nil {
+		return nil, pluginError
+	}
 	if params.UseProtoFiles {
 		schema, pluginError := loadProtoSchema(params.ProtoFiles)
 		if pluginError != nil {
@@ -195,7 +207,7 @@ func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 	}
 	defer connection.Close()
 
-	ctx, cancel, pluginError := grpcContext(params.TimeoutMs, params.Metadata)
+	ctx, cancel, pluginError := grpcContext(ctx, params.TimeoutMs, params.Metadata)
 	if pluginError != nil {
 		return nil, pluginError
 	}
@@ -203,6 +215,9 @@ func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 
 	registry, err := loadFileRegistry(ctx, connection, serviceName)
 	if err != nil {
+		if pluginError := canceledByUser(ctx); pluginError != nil {
+			return nil, pluginError
+		}
 		return nil, grpcReflectionError(err)
 	}
 	descriptor, err := registry.FindDescriptorByName(protoreflect.FullName(serviceName))
@@ -225,7 +240,10 @@ func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 }
 
 // Invoke 调用一个 gRPC 方法（一元、服务端流、客户端流与双向流）。
-func Invoke(params InvokeParams) (any, *apperr.Error) {
+func Invoke(ctx context.Context, params InvokeParams) (any, *apperr.Error) {
+	if pluginError := canceledByUser(ctx); pluginError != nil {
+		return nil, pluginError
+	}
 	serviceName := strings.TrimSpace(params.Service)
 	methodName := strings.TrimSpace(params.Method)
 	if methodName == "" {
@@ -257,7 +275,7 @@ func Invoke(params InvokeParams) (any, *apperr.Error) {
 	}
 	defer connection.Close()
 
-	ctx, cancel, pluginError := grpcContext(params.TimeoutMs, params.Metadata)
+	ctx, cancel, pluginError := grpcContext(ctx, params.TimeoutMs, params.Metadata)
 	if pluginError != nil {
 		return nil, pluginError
 	}
@@ -273,6 +291,9 @@ func Invoke(params InvokeParams) (any, *apperr.Error) {
 	} else {
 		registry, err := loadFileRegistry(ctx, connection, serviceName)
 		if err != nil {
+			if pluginError := canceledByUser(ctx); pluginError != nil {
+				return nil, pluginError
+			}
 			return nil, grpcReflectionError(err)
 		}
 		found, err := findMethod(registry, serviceName, methodName)
@@ -307,9 +328,31 @@ func Invoke(params InvokeParams) (any, *apperr.Error) {
 	fullMethod := fmt.Sprintf("/%s/%s", method.Parent().FullName(), method.Name())
 	started := time.Now()
 	if method.IsStreamingServer() || method.IsStreamingClient() {
-		return invokeStream(ctx, connection, method, fullMethod, outbound, started)
+		result, pluginError := invokeStream(ctx, connection, method, fullMethod, outbound, started)
+		return markCanceled(ctx, result, pluginError)
 	}
-	return invokeUnary(ctx, connection, method, fullMethod, outbound[0], started)
+	result, pluginError := invokeUnary(ctx, connection, method, fullMethod, outbound[0], started)
+	return markCanceled(ctx, result, pluginError)
+}
+
+// markCanceled 把"用户点了终止"标到结果上，而不是丢掉已经收到的消息。
+//
+// 远端对我们取消的反应通常只是 Canceled 状态；这里以调用方写入的 cause 为准，
+// 这样前端既能显示"已终止"，也能继续看到终止前收到的响应。
+// 已经成功结束的调用即使恰好在此时被取消，也当作成功返回。
+func markCanceled(ctx context.Context, value any, pluginError *apperr.Error) (any, *apperr.Error) {
+	if pluginError != nil {
+		return value, pluginError
+	}
+	invocation, ok := value.(*InvokeResult)
+	if !ok {
+		return value, nil
+	}
+	if invocation.OK || canceledByUser(ctx) == nil {
+		return invocation, nil
+	}
+	invocation.Canceled = true
+	return invocation, nil
 }
 
 // outboundPayloads 决定这次调用要发哪些消息。
@@ -546,16 +589,27 @@ func normalizeGRPCTarget(raw string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-func grpcContext(timeoutMs int, entries []common.KeyValue) (context.Context, context.CancelFunc, *apperr.Error) {
+func grpcContext(parent context.Context, timeoutMs int, entries []common.KeyValue) (context.Context, context.CancelFunc, *apperr.Error) {
 	values, err := metadataFromEntries(entries)
 	if err != nil {
 		return nil, nil, apperr.Invalid(err.Error())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(common.ClampInt(timeoutMs, defaultGRPCTimeoutMs, 1, maxGRPCTimeoutMs))*time.Millisecond)
+	ctx, cancel := context.WithTimeout(parent, time.Duration(common.ClampInt(timeoutMs, defaultGRPCTimeoutMs, 1, maxGRPCTimeoutMs))*time.Millisecond)
 	if len(values) > 0 {
 		ctx = metadata.NewOutgoingContext(ctx, values)
 	}
 	return ctx, cancel, nil
+}
+
+// canceledByUser 判断这次失败是否由"用户点了终止"引起。
+//
+// context.Cause 会沿父子链取出我们写入的 apperr.ErrCanceled；派生出的
+// WithTimeout 上下文超时则得到 DeadlineExceeded，不会被误判为终止。
+func canceledByUser(ctx context.Context) *apperr.Error {
+	if errors.Is(context.Cause(ctx), apperr.ErrCanceled) {
+		return apperr.Canceled()
+	}
+	return nil
 }
 
 func metadataFromEntries(entries []common.KeyValue) (metadata.MD, error) {
