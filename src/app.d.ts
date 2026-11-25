@@ -8,6 +8,14 @@
 
 declare module "*.css";
 
+/** 宿主文件传输句柄（用于读取本地 .proto 文件）。 */
+interface DbxPluginFileHandle {
+  handleId: string;
+  name?: string;
+  size?: number;
+  contentType?: string;
+}
+
 /** 宿主注入到沙箱 iframe 的桥接对象。 */
 interface DbxPluginBridge {
   ready: Promise<unknown>;
@@ -22,6 +30,12 @@ interface DbxPluginBridge {
     get(key: string): Promise<unknown>;
     set(key: string, value: unknown): Promise<unknown>;
     delete(key: string): Promise<unknown>;
+  };
+  fileTransfer?: {
+    pick(options: { multiple?: boolean }): Promise<{ files?: DbxPluginFileHandle[] } | null>;
+    read(handleId: string, offset: number, length?: number): Promise<{ dataBase64: string; length: number; eof: boolean }>;
+    cancel?(handleId: string): Promise<unknown>;
+    onDrop?(fn: (files: DbxPluginFileHandle[], meta?: Record<string, unknown>) => void): () => void;
   };
   onContext?(fn: (context: Record<string, unknown>) => void): () => void;
   onEvent?(fn: (event: unknown) => void): () => void;

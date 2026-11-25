@@ -36,7 +36,7 @@ backend/
   internal/apperr/     统一错误码与错误分类（唯一来源）
   internal/values/     跨包共用类型（KeyValue、ClampInt）
   internal/httptool/   HTTP 请求执行
-  internal/grpctool/   gRPC 反射、动态编解码与调用
+  internal/grpctool/   gRPC 反射、proto 文件编译、动态编解码与调用
   internal/rpc/        JSON-RPC 分发、方法名登记、参数解码
   sdk/                 官方 Go SDK 固定副本，非升级任务不要改
 docs/grpc-interactive-streaming.md  交互式双向流设计稿（未实现）
@@ -70,7 +70,7 @@ assets/plugin.svg
   执行期/上游失败用 `apperr.Upstream(kind, ...)`（-32000），内部异常用 `apperr.Internal`
   （-32603）。不要手写数字字面量。
 - **错误必须带 `Kind`**：前端靠 `error.data.kind` 选择排错提示（timeout/tls/dns/
-  connection/auth/reflection）。新增分类要同时更新 `apperr` 与前端 `ERROR_HINT_KEYS`。
+  connection/auth/reflection/proto）。新增分类要同时更新 `apperr` 与前端 `ERROR_HINT_KEYS`。
 - **新增 RPC 方法三处同步**：`internal/rpc` 里的方法名常量、`Methods()` 列表、`Dispatch`
   分支；前端 `store.js` 的 `invoke` 第一个参数要一致。`rpc_test.go` 会检查登记与实现是否漂移。
 - **参数校验在边界做完**：非法参数返回 `-32602`，不要让它流到网络层才炸。

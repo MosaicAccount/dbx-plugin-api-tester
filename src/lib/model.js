@@ -13,6 +13,16 @@ export const SAVE_LIMIT = 240000;
 export const BRIDGE_BODY_LIMIT = 1800000;
 export const NEW_FOLDER = "__new__";
 
+/**
+ * 导入 proto 文件的限制。
+ *
+ * 文件内容会随请求快照一起写进宿主存储（单值上限 256 KiB），所以前端比后端更早
+ * 收紧总量：留出消息、metadata 等字段的空间，避免"能导入但保存失败"。
+ */
+export const PROTO_FILE_LIMIT = 128 * 1024;
+export const PROTO_TOTAL_LIMIT = 160 * 1024;
+export const PROTO_FILE_COUNT_LIMIT = 64;
+
 export const IS_MAC =
   typeof navigator === "undefined" ? false : /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
 export const SAVE_SHORTCUT = IS_MAC ? "⌘S" : "Ctrl+S";
@@ -53,12 +63,16 @@ export function defaultGrpc() {
     target: "",
     tls: false,
     skipTlsVerify: false,
+    // reflection：从服务端反射发现方法；file：用导入的 .proto 文件解析（适合未开反射的服务）。
+    schemaMode: "reflection",
+    protoFiles: [],
     service: "",
     method: "",
     metadata: [blankKV()],
     // 消息用数组：一元与服务端流只用第一条，客户端流/双向流可以有多条。
     // 统一成数组后，切换方法类型不需要重排请求体。
-    messages: ["{\n  \n}"],
+    // 空白保持空字符串，让编辑器显示"输入 JSON 消息"的占位提示，而不是看起来像真实内容的 {}。
+    messages: [""],
     timeoutMs: GRPC_TIMEOUT_DEFAULT,
     services: [],
     methods: [],
@@ -88,14 +102,57 @@ export function normalizeKV(value) {
  *
  * 新快照写的是 `messages` 数组；旧快照只有单条 `message` 字符串，这里顺手迁移，
  * 避免升级后打开历史记录发现请求体是空的。空数组视为"没填过"，回退到默认值。
+ * 旧版本的默认值 `{\n  \n}` 是纯占位，语义等于空消息，统一清空以免被误认为是真内容。
  */
 export function normalizeGrpcMessages(grpc) {
-  if (Array.isArray(grpc?.messages)) {
-    const rows = grpc.messages.filter((item) => typeof item === "string");
-    if (rows.length) return rows;
+  const rows = Array.isArray(grpc?.messages)
+    ? grpc.messages.filter((item) => typeof item === "string")
+    : typeof grpc?.message === "string"
+      ? [grpc.message]
+      : [];
+  return trimGrpcMessages(rows.map(blankGrpcTemplate));
+}
+
+/**
+ * 去掉尾部空消息，至少保留一条。
+ *
+ * 多消息编辑器里"加了但没填"的空消息没有信息量；不清理的话保存、恢复或切换方法后
+ * 会看到一长串空编辑器，很容易被误认为"默认有 N 个消息"。
+ */
+export function trimGrpcMessages(messages) {
+  const rows = (Array.isArray(messages) ? messages : []).filter((item) => typeof item === "string");
+  let end = rows.length;
+  while (end > 1 && !String(rows[end - 1] || "").trim()) end -= 1;
+  return end > 0 ? rows.slice(0, end) : [""];
+}
+
+/** 空的大括号消息等价于空消息；旧快照里的 `{}` 占位统一清空。 */
+export function blankGrpcTemplate(value) {
+  const text = typeof value === "string" ? value : "";
+  return /^\{\s*\}$/.test(text) ? "" : text;
+}
+
+/**
+ * 归一化导入的 proto 文件。
+ *
+ * 前端只保留 basename 作为文件名：浏览器多选文件时拿不到目录结构，后端也按
+ * basename 编译，两边保持一致。同名文件后导入的覆盖先导入的。
+ */
+export function normalizeGrpcProtoFiles(value) {
+  if (!Array.isArray(value)) return [];
+  const files = [];
+  const seen = new Set();
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const rawName = String(item.name || "").trim().replace(/\\/g, "/");
+    const name = rawName.slice(rawName.lastIndexOf("/") + 1);
+    const content = typeof item.content === "string" ? item.content : "";
+    if (!name || !content.trim()) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    files.push({ name, content });
   }
-  if (typeof grpc?.message === "string") return [grpc.message];
-  return ["{\n  \n}"];
+  return files;
 }
 
 /** 目录路径归一化：统一分隔符、去重斜杠、去首尾斜杠。 */
@@ -257,6 +314,8 @@ export function applySnapshot(snapshot) {
     target: typeof grpc.target === "string" ? grpc.target : "",
     service: typeof grpc.service === "string" ? grpc.service : "",
     method: typeof grpc.method === "string" ? grpc.method : "",
+    schemaMode: grpc.schemaMode === "file" ? "file" : "reflection",
+    protoFiles: normalizeGrpcProtoFiles(grpc.protoFiles),
     metadata: normalizeKV(grpc.metadata),
     messages: normalizeGrpcMessages(grpc),
     timeoutMs: clampNumber(grpc.timeoutMs, GRPC_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX),
@@ -287,10 +346,12 @@ export function toSnapshot(state) {
       target: state.grpc.target,
       tls: state.grpc.tls,
       skipTlsVerify: state.grpc.skipTlsVerify,
+      schemaMode: state.grpc.schemaMode,
+      protoFiles: state.grpc.protoFiles.map((file) => ({ ...file })),
       service: state.grpc.service,
       method: state.grpc.method,
       metadata: state.grpc.metadata.map((row) => ({ ...row })),
-      messages: [...state.grpc.messages],
+      messages: trimGrpcMessages(state.grpc.messages),
       timeoutMs: state.grpc.timeoutMs,
     },
     responseTab: state.responseTab,
@@ -432,6 +493,7 @@ export const ERROR_HINT_KEYS = {
   dns: "hintDns",
   connection: "hintConnect",
   auth: "hintAuth",
+  proto: "hintProto",
 };
 
 export function errorMessage(error, fallback) {

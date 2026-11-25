@@ -57,6 +57,124 @@ export async function copy(text) {
   throw new Error("Clipboard unavailable");
 }
 
+/** 宿主是否提供原生文件选择（不提供时组件退回 `<input type="file">`）。 */
+export function canPickFiles() {
+  return typeof plugin?.fileTransfer?.pick === "function";
+}
+
+const FILE_CHUNK_BYTES = 256 * 1024;
+
+function decodeBase64(data) {
+  const binary = atob(String(data || ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function joinBytes(chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return merged;
+}
+
+function fileError(code) {
+  return Object.assign(new Error(code === "size" ? "File is too large" : "Cannot read the file"), { code });
+}
+
+/**
+ * 分块读出一个句柄的全部内容，按 UTF-8 解码成文本。
+ *
+ * maxBytes 是硬上限：超过后立刻中止，避免把几百 MB 的文件整份读进内存再让上层拒绝。
+ */
+async function readHandleText(transfer, handle, maxBytes = 0) {
+  if (maxBytes > 0 && Number(handle.size) > maxBytes) throw fileError("size");
+
+  const chunks = [];
+  let offset = 0;
+  let total = 0;
+  try {
+    for (;;) {
+      const chunk = await transfer.read(handle.handleId, offset, FILE_CHUNK_BYTES);
+      if (!chunk || typeof chunk.dataBase64 !== "string") throw fileError("read");
+      const bytes = decodeBase64(chunk.dataBase64);
+      total += bytes.length;
+      if (maxBytes > 0 && total > maxBytes) throw fileError("size");
+      chunks.push(bytes);
+      if (chunk.eof) break;
+      const length = Number(chunk.length) || 0;
+      if (length <= 0) throw fileError("read");
+      offset += length;
+    }
+  } finally {
+    try {
+      await transfer.cancel?.(handle.handleId);
+    } catch {
+      // 句柄关闭失败不影响已经读到的内容。
+    }
+  }
+  const decoder = new TextDecoder("utf-8");
+  return { name: String(handle.name || "imported.proto"), content: decoder.decode(joinBytes(chunks)) };
+}
+
+/** 把一个句柄读成结果；失败时返回带 error 的占位项，不中断其余文件。 */
+async function readHandleResult(transfer, handle, maxBytes) {
+  try {
+    return await readHandleText(transfer, handle, maxBytes);
+  } catch (error) {
+    return {
+      name: String(handle.name || "imported.proto"),
+      content: "",
+      error: error?.code === "size" ? "size" : "unreadable",
+    };
+  }
+}
+
+/**
+ * 用宿主文件传输打开本地文件并读成文本。
+ *
+ * 返回 null 表示宿主没有 fileTransfer（调用方应退回浏览器文件选择器）；
+ * 返回空数组表示用户取消了选择。传输按分块读，避免一次性占满内存。
+ * @returns {Promise<{ name: string, content: string }[] | null>}
+ */
+export async function pickProtoFiles(options = {}) {
+  const transfer = plugin?.fileTransfer;
+  if (!transfer || typeof transfer.pick !== "function") return null;
+
+  const maxBytes = Number(options.maxBytes) || 0;
+  const selection = await transfer.pick({ multiple: true });
+  const handles = Array.isArray(selection?.files) ? selection.files : [];
+  const results = [];
+  for (const handle of handles) results.push(await readHandleResult(transfer, handle, maxBytes));
+  return results;
+}
+
+/**
+ * 监听桌面端系统拖放。返回取消订阅函数；宿主不支持时返回 null。
+ *
+ * 桌面宿主会接管落到工作台上的系统拖拽，此时 DOM drop 收不到文件，必须用这条通道。
+ */
+export function onProtoFileDrop(handler, options = {}) {
+  const transfer = plugin?.fileTransfer;
+  if (!transfer || typeof transfer.onDrop !== "function") return null;
+  const maxBytes = Number(options.maxBytes) || 0;
+  return transfer.onDrop(async (handles) => {
+    const files = [];
+    for (const handle of Array.isArray(handles) ? handles : []) {
+      files.push(await readHandleResult(transfer, handle, maxBytes));
+    }
+    try {
+      handler(files);
+    } catch {
+      // 展示层自己的错误提示已经覆盖；这里只保证宿主回调不产生未处理的 rejection。
+    }
+  });
+}
+
 /**
  * 构造宿主存储。
  *

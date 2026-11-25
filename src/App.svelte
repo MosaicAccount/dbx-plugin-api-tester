@@ -19,6 +19,7 @@
     folderDeleteStats,
     initialize,
     invokeGrpc,
+    layout as layoutStore,
     listFolders,
     moveFolder,
     moveSaved,
@@ -29,6 +30,7 @@
     saveCurrent,
     sendHttp,
     setProtocol,
+    setSplit,
     showToast,
     state as appState,
     toast as toastStore,
@@ -46,7 +48,9 @@
   } from "./lib/model.js";
   import SavedTree from "./components/SavedTree.svelte";
   import HistoryList from "./components/HistoryList.svelte";
+  import HttpRequestBar from "./components/HttpRequestBar.svelte";
   import HttpPanel from "./components/HttpPanel.svelte";
+  import GrpcRequestHead from "./components/GrpcRequestHead.svelte";
   import GrpcPanel from "./components/GrpcPanel.svelte";
   import ResponsePanel from "./components/ResponsePanel.svelte";
   import Modal from "./components/Modal.svelte";
@@ -60,6 +64,10 @@
   /** 侧栏拖拽中的请求与指针位置；null 表示没有拖拽。 */
   let dragState = $state(null);
   let menuPosition = $state({ left: 8, top: 0 });
+  /** 请求/响应分栏容器；null 表示还没挂载。 */
+  let workspace = $state(null);
+  /** 正在拖动分栏分隔条。 */
+  let resizingSplit = $state(false);
 
   const title = $derived(
     $appState.activeName
@@ -255,6 +263,53 @@
   // 快捷键
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // 请求 / 响应分栏
+  // -------------------------------------------------------------------------
+
+  function onSplitterMove(event) {
+    if (!resizingSplit || !workspace) return;
+    const rect = workspace.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    setSplit((event.clientX - rect.left) / rect.width);
+  }
+
+  function onSplitterDown(event) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    resizingSplit = true;
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // 指针捕获失败时仍可用键盘调整，不影响布局。
+    }
+  }
+
+  function onSplitterUp(event) {
+    if (!resizingSplit) return;
+    resizingSplit = false;
+    try {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // 指针可能已经释放，忽略即可。
+    }
+  }
+
+  /** 分隔条支持方向键微调，键盘用户不必拖拽。 */
+  function onSplitterKeydown(event) {
+    const step = event.shiftKey ? 0.1 : 0.02;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      setSplit($layoutStore.split - step);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      setSplit($layoutStore.split + step);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setSplit(0.5);
+    }
+  }
+
   function onKeydown(event) {
     if (event.key === "Escape") {
       if (!sideMenu) return;
@@ -375,15 +430,49 @@
         </div>
       </header>
 
-      <section class="editor">
+      <!-- 接口信息（方法 / URL / 目标 / 描述来源）占满整行，下面才是编辑器和响应栏的分栏。 -->
+      <div class="request-head">
         {#if $appState.protocol === "http"}
-          <HttpPanel {t} http={$appState.http} sending={$appState.sending} />
+          <HttpRequestBar {t} http={$appState.http} sending={$appState.sending} />
         {:else}
-          <GrpcPanel {t} grpc={$appState.grpc} sending={$appState.sending} discovering={$appState.discovering} />
+          <GrpcRequestHead {t} grpc={$appState.grpc} sending={$appState.sending} discovering={$appState.discovering} />
         {/if}
-      </section>
+      </div>
 
-      <ResponsePanel {t} response={$appState.response} responseTab={$appState.responseTab} />
+      <div class="workspace" class:is-resizing={resizingSplit} bind:this={workspace} style:--split={$layoutStore.split}>
+        <section class="editor">
+          {#if $appState.protocol === "http"}
+            <HttpPanel {t} http={$appState.http} />
+          {:else}
+            <GrpcPanel {t} grpc={$appState.grpc} sending={$appState.sending} />
+          {/if}
+        </section>
+
+        <!-- 分隔条是可用方向键调整的 widget：用 slider 角色向读屏器暴露"当前比例"。 -->
+        <div
+          class="splitter"
+          role="slider"
+          aria-orientation="horizontal"
+          aria-label={t("splitPanes")}
+          title={t("splitPanes")}
+          aria-valuemin="25"
+          aria-valuemax="75"
+          aria-valuenow={Math.round($layoutStore.split * 100)}
+          tabindex="0"
+          onpointerdown={onSplitterDown}
+          onpointermove={onSplitterMove}
+          onpointerup={onSplitterUp}
+          onpointercancel={onSplitterUp}
+          onkeydown={onSplitterKeydown}
+        ></div>
+
+        <ResponsePanel
+          {t}
+          response={$appState.response}
+          responseTab={$appState.responseTab}
+          protocol={$appState.protocol}
+        />
+      </div>
     </main>
   </div>
 {/if}

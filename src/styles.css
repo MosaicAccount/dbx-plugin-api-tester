@@ -128,6 +128,8 @@
 html,
 body {
   height: 100%;
+  /* 工作台自己管理滚动区域：整页固定，权限内的列表各自滚动。 */
+  overflow: hidden;
 }
 
 body {
@@ -152,6 +154,7 @@ textarea {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   height: 100vh;
+  overflow: hidden;
 }
 
 /* Sidebar */
@@ -601,11 +604,13 @@ textarea {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   background: var(--bg);
 }
 
 .topbar {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
@@ -627,12 +632,80 @@ textarea {
   gap: 6px;
 }
 
-.editor {
+/*
+ * 接口信息区（方法 / URL / 目标 / 描述来源）：占满整行，
+ * 不参与下面的左右分栏，避免被响应栏挤窄。
+ */
+.request-head {
+  flex: none;
+  min-width: 0;
   padding: 12px 16px 0;
 }
 
-.editor-pane {
+/*
+ * 请求 / 响应左右分栏：宽窗口默认左右排列，两侧都有完整高度；
+ * 窄窗口在下面的 media query 里退回上下排列。
+ */
+.workspace {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, calc(var(--split, 0.5) * 100%)) 7px minmax(0, 1fr);
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.splitter {
+  position: relative;
+  flex: none;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.splitter::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: var(--border);
+  content: "";
+}
+
+.splitter:hover::before,
+.splitter:focus-visible::before,
+.workspace.is-resizing .splitter::before {
+  left: calc(50% - 0.5px);
+  width: 2px;
+  background: var(--primary);
+}
+
+.splitter:focus-visible {
+  outline: none;
+}
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  /* 极端矮窗口里内容会超过可用高度；让请求列整体可滚，避免内容被裁掉。 */
+  overflow: auto;
+  padding: 0 16px 12px;
+}
+
+.editor-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 
 .is-hidden {
@@ -886,6 +959,7 @@ textarea {
 
 .request-bar {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 8px;
 }
@@ -970,6 +1044,8 @@ textarea {
 
 .tabs {
   display: flex;
+  flex: none;
+  align-items: center;
   gap: 2px;
   margin-top: 12px;
   border-bottom: 1px solid var(--border);
@@ -1007,6 +1083,60 @@ textarea {
 
 .tab-panel.is-active {
   display: block;
+  flex: 1;
+  min-height: 120px;
+  overflow: auto;
+}
+
+/* 消息面板自己分配高度：提示和工具条固定，只有消息列表滚动。 */
+.tab-panel--messages.is-active {
+  display: flex;
+  flex-direction: column;
+  min-height: 160px;
+  overflow: hidden;
+}
+
+/* 请求体面板让编辑器吃掉剩余高度，左右分栏时才有足够的书写空间。 */
+.tab-panel--fill.is-active {
+  display: flex;
+  flex-direction: column;
+  min-height: 160px;
+  overflow: hidden;
+}
+
+.tab-panel--messages .message-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+/* 一元 / 服务端流只有一条消息：让编辑器吃满剩余高度，而不是固定一小块。 */
+.message-list.is-single {
+  display: flex;
+  flex-direction: column;
+}
+
+.message-list.is-single .message-block {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.message-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 0;
+}
+
+.message-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .panel-row {
@@ -1117,6 +1247,21 @@ textarea {
   word-break: break-word;
 }
 
+/* 填满父容器：请求体这类"主要输入区"在大窗口里应占满可用高度。 */
+.code-editor.is-fill {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.code-editor.is-fill .code-area {
+  flex: 1;
+  min-height: 96px;
+  max-height: none;
+  resize: none;
+}
+
 .code-editor .code-area {
   position: relative;
   z-index: 1;
@@ -1182,14 +1327,103 @@ textarea {
   color: var(--warning);
 }
 
+.grpc-schema {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 10px;
+}
+
+.grpc-schema-label {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.proto-files {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  /* 文件很多时只让这一条滚，不要挤占下面的 service / method / 消息区。 */
+  max-height: 88px;
+  min-height: 0;
+  overflow: auto;
+  margin-top: 8px;
+}
+
+.proto-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 4px 2px 9px;
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.proto-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proto-chip-remove {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.proto-chip-remove:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+.proto-total {
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.proto-hint {
+  flex: none;
+  margin-top: 6px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .grpc-selects {
   display: grid;
+  flex: none;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
   margin-top: 10px;
 }
 
 .grpc-signature {
+  flex: none;
   min-height: 18px;
   padding-top: 6px;
   color: var(--muted);
@@ -1201,12 +1435,39 @@ textarea {
 
 .response {
   display: flex;
-  flex: 1;
   flex-direction: column;
-  min-height: 180px;
-  margin-top: 12px;
-  border-top: 1px solid var(--border);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background: var(--panel);
+}
+
+/*
+ * 窄窗口（浮动窗口、分屏、小屏）左右放不下两栏，退回上下排列：
+ * 请求区最高 55%，响应区吃剩余空间；两者都各自滚动。
+ */
+@media (max-width: 880px) {
+  .workspace {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .splitter {
+    display: none;
+  }
+
+  .editor {
+    max-height: 55%;
+    overflow: auto;
+  }
+
+  .response {
+    flex: 1 1 0;
+    min-height: 120px;
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
 }
 
 .response-head {
@@ -1273,7 +1534,8 @@ textarea {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 0 16px 16px;
+  /* 顶部留白：错误块和流式消息不要贴着标签栏，视觉上才不像挤在一起。 */
+  padding: 10px 16px 16px;
 }
 
 .response-empty {

@@ -9,9 +9,13 @@
   import { ERROR_HINT_KEYS, formatBytes, statusTone } from "../lib/model.js";
   import { copyResponse, setResponseTab } from "../lib/store.js";
 
-  let { t, response = null, responseTab = "body" } = $props();
+  let { t, response = null, responseTab = "body", protocol = "http" } = $props();
 
-  const headersTabLabel = $derived(response?.protocol === "grpc" ? t("metadata") : t("headers"));
+  // 响应面板必须用"响应"语义的标签：请求面板已经占用了「请求体 / 请求头」，
+  // 这里沿用同一组文案会让人以为看到的是刚刚填的请求。
+  // 还没有响应时用当前请求协议判断，gRPC 下也能显示「响应元数据」。
+  const activeProtocol = $derived(response?.protocol || protocol);
+  const headersTabLabel = $derived(activeProtocol === "grpc" ? t("responseMetadata") : t("responseHeadersTab"));
 
   const hint = $derived.by(() => {
     if (response?.kind !== "error") return "";
@@ -111,7 +115,7 @@
 
   <div class="tabs tabs--response">
     <button class="tab" class:is-active={responseTab === "body"} type="button" onclick={() => setResponseTab("body")}>
-      {t("body")}
+      {t("responseBody")}
     </button>
     <button class="tab" class:is-active={responseTab === "headers"} type="button" onclick={() => setResponseTab("headers")}>
       {headersTabLabel}
