@@ -4,6 +4,9 @@
    *
    * 拆出来单独占满整行：方法、目标、proto 文件这些"接口信息"不应该被右侧响应栏挤窄。
    * 下面的消息 / 元数据编辑器和响应体做左右分栏。
+   *
+   * proto 文件只在「Proto 文件」模式下出现：没有文件时是一整块可点击 / 可拖入的虚线投放区，
+   * 有文件时文件变成胶囊标签，导入入口收成标签行末尾的虚线小按钮，不再单独占一行。
    */
   import * as host from "../lib/host.js";
   import SelectMenu from "./SelectMenu.svelte";
@@ -252,7 +255,12 @@
         {canceling ? t("stopping") : t("stop")}
       </button>
     {:else}
-      <button class="btn btn-secondary" type="button" disabled={sending} onclick={() => void discoverGrpc()}>
+      <button
+        class="btn btn-secondary"
+        type="button"
+        disabled={sending || (fileMode && !protoFiles.length)}
+        onclick={() => void discoverGrpc()}
+      >
         {fileMode ? t("parseProto") : t("discover")}
       </button>
     {/if}
@@ -293,36 +301,69 @@
         onclick={() => setGrpcSchemaMode("file")}>{t("schemaFile")}</button
       >
     </div>
-    <span class="grow"></span>
-    <button
-      class="btn btn-secondary btn-sm"
-      type="button"
-      title={t("protoFilesHint")}
-      disabled={sending || discovering}
-      onclick={() => void onImportProto()}
-    >
-      <span class="plus" aria-hidden="true">+</span>{t("importProto")}
-    </button>
   </div>
 
-  {#if fileMode && protoFiles.length}
-    <div class="proto-files">
-      {#each protoFiles as file (file.name)}
-        <span class="proto-chip" title={file.name}>
-          <span class="proto-chip-name">{file.name}</span>
-          <button
-            class="proto-chip-remove"
-            type="button"
-            aria-label={t("removeProtoFile", { name: file.name })}
-            title={t("removeProtoFile", { name: file.name })}
-            onclick={() => onRemoveProtoFile(file.name)}>×</button
-          >
+  {#if fileMode}
+    {#if protoFiles.length}
+      <div class="proto-files">
+        {#each protoFiles as file (file.name)}
+          <span class="proto-chip" title={file.name}>
+            <span class="proto-chip-name">{file.name}</span>
+            <button
+              class="proto-chip-remove"
+              type="button"
+              aria-label={t("removeProtoFile", { name: file.name })}
+              title={t("removeProtoFile", { name: file.name })}
+              onclick={() => onRemoveProtoFile(file.name)}
+            >
+              <svg viewBox="0 0 9 9" width="9" height="9" fill="none" aria-hidden="true"
+                ><path d="M2 2l5 5M7 2l-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg
+              >
+            </button>
+          </span>
+        {/each}
+        <button
+          class="proto-add"
+          type="button"
+          title={t("protoFilesHint")}
+          disabled={sending || discovering}
+          onclick={() => void onImportProto()}
+        >
+          <span class="plus" aria-hidden="true">+</span>{t("importProto")}
+        </button>
+        <span class="proto-total">{t("protoFileCount", { count: protoFiles.length, size: formatBytes(protoBytes) })}</span>
+      </div>
+    {:else}
+      <button
+        class="proto-drop"
+        type="button"
+        title={t("protoFilesHint")}
+        disabled={sending || discovering}
+        onclick={() => void onImportProto()}
+      >
+        <span class="proto-drop-icon" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <path
+              d="M8 10.4V3.4m0 0L5.4 6M8 3.4l2.6 2.6"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
+              d="M3 10.2v1.4c0 .8.6 1.4 1.4 1.4h7.2c.8 0 1.4-.6 1.4-1.4v-1.4"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+            />
+          </svg>
         </span>
-      {/each}
-      <span class="proto-total">{t("protoFileCount", { count: protoFiles.length, size: formatBytes(protoBytes) })}</span>
-    </div>
-  {:else if fileMode}
-    <p class="hint proto-hint">{t("protoFilesHint")}</p>
+        <span class="proto-drop-copy">
+          <span class="proto-drop-title">{t("protoDropTitle")}</span>
+          <span class="proto-drop-sub">{t("protoDropHint")}</span>
+        </span>
+      </button>
+    {/if}
   {/if}
 
   <div class="grpc-selects">
@@ -372,10 +413,6 @@
     outline: 2px dashed var(--primary);
     outline-offset: -4px;
     border-radius: 8px;
-  }
-
-  .grow {
-    flex: 1;
   }
 
   .plus {
