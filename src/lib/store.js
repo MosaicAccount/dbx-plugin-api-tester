@@ -586,18 +586,25 @@ export function addGrpcProtoFiles(entries) {
 
 export function removeGrpcProtoFile(name) {
   const target = String(name || "");
-  update((s) => {
-    const protoFiles = s.grpc.protoFiles.filter((file) => file.name !== target);
-    return {
-      ...s,
-      grpc: {
-        ...s.grpc,
-        protoFiles,
-        // 描述来源没了就清掉基于它发现的服务，避免留下无法解析的下拉项。
-        ...(protoFiles.length ? {} : { services: [], service: "", methods: [], method: "" }),
-      },
-    };
-  });
+  update((s) => ({
+    ...s,
+    grpc: {
+      ...s.grpc,
+      protoFiles: s.grpc.protoFiles.filter((file) => file.name !== target),
+      // 服务是这一批文件编译出来的，少一个文件就可能整批编译不过（比如被删的正被别人
+      // import）：先清空再让调用方重新解析，免得下拉框停在已经不成立的列表上。
+      services: [],
+      service: "",
+      methods: [],
+      method: "",
+    },
+  }));
+  scheduleDraftPersist();
+}
+
+/** 清空由描述来源派生的服务 / 方法选择，并让草稿记住这个选择。 */
+function clearGrpcSchema() {
+  update((s) => ({ ...s, grpc: { ...s.grpc, services: [], service: "", methods: [], method: "" } }));
   scheduleDraftPersist();
 }
 
@@ -1176,7 +1183,18 @@ export async function discoverGrpc() {
   } catch (error) {
     const message = errorMessage(error, t("requestFailed"));
     const kind = describeErrorKind(error);
-    finishRun(run, { protocol: "grpc", kind: "error", error: message, errorKind: kind });
+    // 文件模式下服务只能来自当前这批文件：编译失败说明这份列表已经不成立了，
+    // 继续显示只会让用户以为还能调用（点了也只会再报同一个编译错误）。
+    // 被终止或被新请求取代的迟到失败不写状态，和 finishRun 的丢弃规则保持一致。
+    if (isCurrentRun(run) && base.useProtoFiles) clearGrpcSchema();
+    finishRun(run, {
+      protocol: "grpc",
+      kind: "error",
+      // 解析 / 发现失败不是"请求失败"，响应面板按这个字段换措辞。
+      action: base.useProtoFiles ? "parse" : "discover",
+      error: message,
+      errorKind: kind,
+    });
     if (kind === "canceled") showToast(t("requestCanceled"), "warn");
     // proto 语法错误、缺少 import 等只出现在这里，用提示条保证用户不会漏看。
     else showToast(truncate(message, 180), "error");

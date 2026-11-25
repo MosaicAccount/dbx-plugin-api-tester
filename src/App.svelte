@@ -16,6 +16,7 @@
     createFolder,
     deleteFolder,
     deleteSaved,
+    discoverGrpc,
     folderDeleteStats,
     initialize,
     invokeGrpc,
@@ -27,6 +28,7 @@
     openHistory,
     openSaved,
     refreshTranslator,
+    removeGrpcProtoFile,
     saveCurrent,
     sendHttp,
     setHistoryRatio,
@@ -210,6 +212,13 @@
       case "confirm-clear-history":
         await clearHistory();
         break;
+      case "confirm-remove-proto": {
+        const remaining = $appState.grpc.protoFiles.filter((file) => file.name !== pending.name).length;
+        removeGrpcProtoFile(pending.name);
+        // 剩下的文件重新解析一次：缺依赖会解析失败，界面已把缺的文件点名列出。
+        if (remaining) void discoverGrpc();
+        break;
+      }
       default:
         break;
     }
@@ -262,6 +271,23 @@
       path,
       title: t("deleteFolderTitle"),
       message: t("deleteFolderMessage", { name: path, requests: stats.requests, folders: stats.folders }),
+      confirmLabel: t("delete"),
+      danger: true,
+    };
+  }
+
+  /**
+   * 删除被其他文件 import 的 proto 之前确认。
+   *
+   * 这类删除会让整批编译失败，且失败点看起来像是"被 import 的文件坏了"，
+   * 所以把后果和被牵连的文件一起说清楚。
+   */
+  function confirmRemoveProtoFile(name, dependents) {
+    dialog = {
+      kind: "confirm-remove-proto",
+      name,
+      title: t("protoRemoveTitle"),
+      message: t("protoRemoveMessage", { name, files: dependents.join(t("listSeparator")) }),
       confirmLabel: t("delete"),
       danger: true,
     };
@@ -597,6 +623,7 @@
             sending={$appState.sending}
             discovering={$appState.discovering}
             canceling={$appState.canceling}
+            onconfirmremove={confirmRemoveProtoFile}
           />
         {/if}
       </div>

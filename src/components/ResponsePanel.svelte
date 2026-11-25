@@ -23,6 +23,20 @@
     return key ? t(key) : "";
   });
 
+  /**
+   * 解析 / 发现描述信息失败时不要写成「请求失败」：用户点的是「解析文件」，
+   * 面板却报告请求失败会让人以为调用已经发出去了。
+   */
+  const failureLabel = $derived(
+    t(
+      response?.action === "parse"
+        ? "parseFailed"
+        : response?.action === "discover"
+          ? "discoverFailed"
+          : "requestFailed",
+    ),
+  );
+
   const httpBadges = $derived.by(() => {
     const data = response?.data;
     if (response?.protocol !== "http" || !data) return [];
@@ -103,7 +117,7 @@
         {#if response.errorKind === "canceled"}
           <span class="pill pill--warn">{t("canceledBadge")}</span>
         {:else}
-          <span class="pill pill--err">{t("requestFailed")}</span>
+          <span class="pill pill--err">{failureLabel}</span>
         {/if}
         {#if Number.isFinite(response.elapsedMs)}<span class="meta">{response.elapsedMs} ms</span>{/if}
       {:else if response?.protocol === "http"}
@@ -155,7 +169,7 @@
     {:else if response.kind === "error"}
       <div class="response-error">
         <div class="response-error-title">
-          {response.errorKind === "canceled" ? t("requestCanceled") : t("requestFailed")}
+          {response.errorKind === "canceled" ? t("requestCanceled") : failureLabel}
         </div>
         {#if response.errorKind !== "canceled"}
           <pre class="response-error-code">{response.error}</pre>

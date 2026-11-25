@@ -1579,6 +1579,22 @@ textarea {
   font-size: 11px;
 }
 
+/* 缺了它 import 的文件：虚线 + 警告色，配合下面那行提示说明整批暂时编译不过。 */
+.proto-chip.is-broken {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--warning) 65%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+.proto-missing {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-top: 6px;
+  color: var(--warning);
+  font-size: 11px;
+}
+
 .proto-chip-name {
   overflow: hidden;
   text-overflow: ellipsis;

@@ -16,6 +16,8 @@
     PROTO_TOTAL_LIMIT,
     byteLength,
     formatBytes,
+    protoDependents,
+    protoImportGaps,
   } from "../lib/model.js";
   import {
     addGrpcProtoFiles,
@@ -31,7 +33,14 @@
     showToast,
   } from "../lib/store.js";
 
-  let { t, grpc, sending = false, discovering = false, canceling = false } = $props();
+  let {
+    t,
+    grpc,
+    sending = false,
+    discovering = false,
+    canceling = false,
+    onconfirmremove = null,
+  } = $props();
 
   /** 隐藏的文件选择器，宿主没有 fileTransfer 时的降级路径。 */
   let fileInput = $state(null);
@@ -42,12 +51,24 @@
   const protoFiles = $derived(Array.isArray(grpc.protoFiles) ? grpc.protoFiles : []);
   const protoBytes = $derived(protoFiles.reduce((total, file) => total + byteLength(file.content), 0));
 
+  /**
+   * 少导入一个被 import 的文件，整批就编译不过。后端会报第一个失败的文件，
+   * 但光看报错很容易误以为是那个文件坏了，所以这里直接把缺失的文件和依赖它的文件列出来。
+   */
+  const importGaps = $derived(protoImportGaps(protoFiles));
+  const missingHints = $derived.by(() =>
+    [...importGaps.missing].map(([name, dependents]) =>
+      t("protoMissingImport", { name, files: dependents.join(t("listSeparator")) }),
+    ),
+  );
+
   const serviceItems = $derived.by(() => {
     // 文件模式下还没导入文件时不要展示旧的 service：它来自上一次的 proto，已经无法解析。
     if (fileMode && !protoFiles.length) return [];
     const services = [...grpc.services];
     if (grpc.service && !services.includes(grpc.service)) services.unshift(grpc.service);
-    if (!services.length) return [{ value: "", label: t("chooseService"), disabled: true }];
+    // 文件模式下按钮叫「解析文件」，占位文案也跟着换，别让用户去找「发现服务」。
+    if (!services.length) return [{ value: "", label: t(fileMode ? "parseFirst" : "chooseService"), disabled: true }];
     return services.map((name) => ({ value: name, label: name }));
   });
 
@@ -55,7 +76,7 @@
     if (fileMode && !protoFiles.length) return [];
     let names = grpc.methods.map((method) => method.name);
     if (grpc.method && !names.includes(grpc.method)) names = [grpc.method, ...names];
-    if (!names.length) return [{ value: "", label: t("discoverFirst"), disabled: true }];
+    if (!names.length) return [{ value: "", label: t(fileMode ? "parseFirstMethod" : "discoverFirst"), disabled: true }];
     return names.map((name) => ({ value: name, label: name }));
   });
 
@@ -207,7 +228,23 @@
     return () => off?.();
   });
 
+  /**
+   * 删除一个已导入的文件。
+   *
+   * 被别的文件 import 时先交由父组件确认：删掉这类文件会让整批编译失败，
+   * 属于"看不出后果的操作"，不该点一下就生效。
+   */
   function onRemoveProtoFile(name) {
+    const dependents = protoDependents(protoFiles, name);
+    if (dependents.length && onconfirmremove) {
+      onconfirmremove(name, dependents);
+      return;
+    }
+    dropProtoFile(name);
+  }
+
+  /** 真正执行删除：清掉文件并重新解析剩下的组合。 */
+  function dropProtoFile(name) {
     const remaining = protoFiles.filter((file) => file.name !== name).length;
     removeGrpcProtoFile(name);
     // 还剩文件时立刻重新解析，避免下拉框停留在被删文件的服务上。
@@ -307,7 +344,7 @@
     {#if protoFiles.length}
       <div class="proto-files">
         {#each protoFiles as file (file.name)}
-          <span class="proto-chip" title={file.name}>
+          <span class="proto-chip" class:is-broken={importGaps.broken.has(file.name)} title={file.name}>
             <span class="proto-chip-name">{file.name}</span>
             <button
               class="proto-chip-remove"
@@ -333,6 +370,11 @@
         </button>
         <span class="proto-total">{t("protoFileCount", { count: protoFiles.length, size: formatBytes(protoBytes) })}</span>
       </div>
+      {#if missingHints.length}
+        <div class="proto-missing" role="status">
+          {#each missingHints as hint (hint)}<span>{hint}</span>{/each}
+        </div>
+      {/if}
     {:else}
       <button
         class="proto-drop"

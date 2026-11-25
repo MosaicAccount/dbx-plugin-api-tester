@@ -169,6 +169,87 @@ export function normalizeGrpcProtoFiles(value) {
   return files;
 }
 
+/** 取文件名本身，和后端 normalizeProtoName 的 basename 规则一致。 */
+function protoBaseName(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop();
+}
+
+/** 与后端 normalizeProtoImports 同一条规则：import 只认 basename，google/protobuf/* 是内置的。 */
+const PROTO_IMPORT_PATTERN = /^[ \t]*import[ \t]+(?:public[ \t]+|weak[ \t]+)?"([^"\r\n]+)"/gm;
+
+/** 读出一段 proto 源码 import 的其他文件（basename，已跳过内置的 google/protobuf/*）。 */
+function protoImportsOf(content) {
+  const imports = [];
+  for (const match of String(content || "").matchAll(PROTO_IMPORT_PATTERN)) {
+    const path = match[1];
+    if (path.startsWith("google/protobuf/")) continue;
+    const target = protoBaseName(path);
+    if (!target || imports.includes(target)) continue;
+    imports.push(target);
+  }
+  return imports;
+}
+
+/** 找出直接 import 了指定文件的那些文件（删除前用来提示"会把谁弄坏"）。 */
+export function protoDependents(files, name) {
+  const target = protoBaseName(name);
+  const dependents = [];
+  for (const file of files) {
+    const base = protoBaseName(file.name);
+    if (!base || base === target) continue;
+    if (protoImportsOf(file.content).includes(target)) dependents.push(base);
+  }
+  return dependents.sort();
+}
+
+/**
+ * 找出因缺少 import 而编译不过的文件。
+ *
+ * 只用于界面提示：编译的权威判定仍在 sidecar，漏报就退回后端报错。规则刻意和后端
+ * 保持一致（去掉目录前缀、跳过 google/protobuf/*），注释掉的 import 不会被匹配到。
+ *
+ * @param {{ name: string, content: string }[]} files
+ * @returns {{ missing: Map<string, string[]>, broken: Set<string> }}
+ *   missing：缺失的文件名 → 直接依赖它的文件；broken：自身或依赖链上有缺失的文件。
+ */
+export function protoImportGaps(files) {
+  const names = files.map((file) => protoBaseName(file.name));
+  const present = new Set(names);
+  const imports = new Map();
+  const directMissing = new Map();
+
+  for (const file of files) {
+    const name = protoBaseName(file.name);
+    const wanted = protoImportsOf(file.content);
+    imports.set(name, wanted);
+    const absent = wanted.filter((target) => !present.has(target));
+    if (absent.length) directMissing.set(name, absent);
+  }
+
+  const missing = new Map();
+  for (const [name, absent] of directMissing) {
+    for (const target of absent) missing.set(target, [...(missing.get(target) || []), name]);
+  }
+
+  // 依赖链上有坏文件也算坏：删掉 common.proto 时 chain_top.proto 同样无法编译。
+  const broken = new Set(directMissing.keys());
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [name, wanted] of imports) {
+      if (broken.has(name)) continue;
+      if (!wanted.some((target) => broken.has(target))) continue;
+      broken.add(name);
+      changed = true;
+    }
+  }
+
+  return { missing, broken };
+}
+
 /** 目录路径归一化：统一分隔符、去重斜杠、去首尾斜杠。 */
 export function normalizeFolder(value) {
   return String(value || "")
