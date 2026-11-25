@@ -210,16 +210,123 @@ textarea {
   padding-top: 12px;
 }
 
+/* 历史分组标题本身就是折叠开关；按钮沿用标题排版，只加一点悬停底色。 */
+.side-head-toggle {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 5px;
+  padding: 2px 5px 2px 2px;
+  margin-left: -2px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.side-head-toggle:hover,
+.side-head-toggle:focus-visible {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+  outline: none;
+}
+
+.side-head-chevron {
+  display: inline-flex;
+  flex: none;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.side-head-toggle:hover .side-head-chevron,
+.side-head-toggle:focus-visible .side-head-chevron {
+  color: inherit;
+}
+
+/* 折叠后箭头朝右，和目录树的展开语义保持一致。 */
+.side-head-toggle[aria-expanded="false"] .side-head-chevron {
+  transform: rotate(-90deg);
+}
+
+.side-head-count {
+  flex: none;
+  min-width: 16px;
+  border-radius: 999px;
+  padding: 1px 5px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 14px;
+  text-align: center;
+}
+
+/*
+ * 侧栏高度分配：已保存目录树吃掉所有剩余高度，历史只按内容占高且最多占 35%。
+ * 历史在高度上让位给目录，折叠开关则用来把这 35% 也收回去。
+ */
 .side-list {
-  min-height: 42px;
-  max-height: 38%;
+  flex: 1 1 0;
+  min-height: 72px;
   overflow: auto;
   padding: 0 8px 4px;
 }
 
 .side-list--history {
-  flex: 1;
+  flex: 0 1 auto;
+  min-height: 42px;
+  max-height: 35%;
+}
+
+/* 用户拖过分隔条后：两块列表按保存的比例分高度，窗口缩放时比例保持不变。 */
+.side-list--history.is-sized {
+  flex: var(--history-grow, 1) 1 0;
   max-height: none;
+}
+
+/* 历史面板分隔条：拖动改高度，方向键微调，交互和主分栏保持一致。 */
+.side-splitter {
+  position: relative;
+  flex: none;
+  height: 7px;
+  margin-top: 2px;
+  background: transparent;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.side-splitter::before {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--border);
+  content: "";
+}
+
+.side-splitter:hover::before,
+.side-splitter:focus-visible::before,
+.app.is-resizing-history .side-splitter::before {
+  height: 2px;
+  background: var(--primary);
+  transform: translateY(-0.5px);
+}
+
+.side-splitter:focus-visible {
+  outline: none;
+}
+
+/* 分隔条自己画了线，紧跟着的历史标题就不要再画一条。 */
+.side-splitter + .side-head--history {
+  margin-top: 0;
+  border-top: 0;
+  padding-top: 8px;
 }
 
 .side-item {
@@ -254,6 +361,16 @@ textarea {
 }
 
 .app.is-dragging {
+  user-select: none;
+}
+
+/* 拖历史分隔条时指针可能跑到侧栏外，全局统一成上下拖拽光标。 */
+.app.is-resizing-history,
+.app.is-resizing-history * {
+  cursor: row-resize !important;
+}
+
+.app.is-resizing-history {
   user-select: none;
 }
 

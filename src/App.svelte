@@ -29,11 +29,15 @@
     refreshTranslator,
     saveCurrent,
     sendHttp,
+    setHistoryRatio,
     setProtocol,
     setSplit,
     showToast,
     state as appState,
     toast as toastStore,
+    toggleHistory,
+    HISTORY_RATIO_MAX,
+    HISTORY_RATIO_MIN,
   } from "./lib/store.js";
   import {
     SAVE_AS_SHORTCUT,
@@ -71,6 +75,18 @@
   let workspace = $state(null);
   /** 正在拖动分栏分隔条。 */
   let resizingSplit = $state(false);
+  /** 正在拖动历史面板分隔条。 */
+  let resizingHistory = $state(false);
+  /** 两块列表的 DOM，拖动历史分隔条时用来换算比例。 */
+  let savedListEl = $state(null);
+  let historyListEl = $state(null);
+  /** 拖动开始时的几何信息（可用高度、底边、指针到列表顶部的偏移）；null 表示没在拖。 */
+  let historyDrag = null;
+
+  /** 历史面板占比换算成 flex-grow：比例 r 对应 r/(1-r)，两块列表按权重分高度。 */
+  const historyGrow = $derived(
+    typeof $layoutStore.historyRatio === "number" ? $layoutStore.historyRatio / (1 - $layoutStore.historyRatio) : 1,
+  );
 
   const title = $derived(
     $appState.activeName
@@ -313,6 +329,80 @@
     }
   }
 
+  // -------------------------------------------------------------------------
+  // 历史面板高度
+  // -------------------------------------------------------------------------
+
+  function onHistorySplitterDown(event) {
+    if (event.button !== 0) return;
+    const savedRect = savedListEl?.getBoundingClientRect();
+    const historyRect = historyListEl?.getBoundingClientRect();
+    if (!savedRect || !historyRect) return;
+    event.preventDefault();
+    // 两块列表的底边在分栏里是固定的，拖拽只需把"列表顶部"对到指针上；
+    // offset 是分隔条到历史列表顶部的距离（标题高度），拖拽期间保持不变。
+    historyDrag = {
+      free: savedRect.height + historyRect.height,
+      bottom: historyRect.bottom,
+      offset: historyRect.top - event.clientY,
+    };
+    resizingHistory = true;
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // 指针捕获失败时仍可用键盘调整，不影响布局。
+    }
+  }
+
+  function onHistorySplitterMove(event) {
+    if (!resizingHistory || !historyDrag || historyDrag.free <= 0) return;
+    const target = historyDrag.bottom - (event.clientY + historyDrag.offset);
+    setHistoryRatio(target / historyDrag.free);
+  }
+
+  function onHistorySplitterUp(event) {
+    if (!resizingHistory) return;
+    resizingHistory = false;
+    historyDrag = null;
+    try {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // 指针可能已经释放，忽略即可。
+    }
+  }
+
+  /** 键盘调整的起点：还没拖过时按当前实际高度换算。 */
+  function currentHistoryRatio() {
+    const ratio = $layoutStore.historyRatio;
+    if (typeof ratio === "number") return ratio;
+    const savedRect = savedListEl?.getBoundingClientRect();
+    const historyRect = historyListEl?.getBoundingClientRect();
+    const free = (savedRect?.height ?? 0) + (historyRect?.height ?? 0);
+    return free > 0 && historyRect ? historyRect.height / free : 0.35;
+  }
+
+  function onHistorySplitterKeydown(event) {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const step = event.shiftKey ? 0.08 : 0.02;
+    setHistoryRatio(currentHistoryRatio() + (event.key === "ArrowUp" ? step : -step));
+  }
+
+  // 指针捕获失败时，指针可能在分隔条外抬起；用窗口监听兜底收尾，避免全局拖拽光标卡住。
+  $effect(() => {
+    if (!resizingHistory) return;
+    const stop = () => {
+      resizingHistory = false;
+      historyDrag = null;
+    };
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+    return () => {
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+    };
+  });
+
   function onKeydown(event) {
     if (event.key === "Escape") {
       if (!sideMenu) return;
@@ -343,7 +433,7 @@
     <p>{t("hostUnavailable")}</p>
   </div>
 {:else}
-  <div class="app" class:is-dragging={dragState !== null}>
+  <div class="app" class:is-dragging={dragState !== null} class:is-resizing-history={resizingHistory}>
     <aside class="sidebar">
       <div class="brand">
         <svg class="brand-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true">
@@ -370,7 +460,7 @@
           onclick={(event) => openNewMenu("", event.currentTarget)}>+</button
         >
       </div>
-      <div class="side-list">
+      <div class="side-list" bind:this={savedListEl}>
         <SavedTree
           {t}
           savedIndex={$appState.savedIndex}
@@ -390,13 +480,64 @@
         <p class="side-hint hint">{t("dragHint")}</p>
       {/if}
 
+      {#if !$layoutStore.historyCollapsed && $appState.historyIndex.length > 0}
+        <!-- 分隔条是可用方向键调整的 widget：和请求/响应分栏一样用 slider 角色暴露当前占比。 -->
+        <div
+          class="side-splitter"
+          role="slider"
+          aria-orientation="vertical"
+          aria-label={t("resizeHistory")}
+          title={t("resizeHistory")}
+          aria-valuemin={Math.round(HISTORY_RATIO_MIN * 100)}
+          aria-valuemax={Math.round(HISTORY_RATIO_MAX * 100)}
+          aria-valuenow={Math.round(($layoutStore.historyRatio ?? 0.35) * 100)}
+          tabindex="0"
+          onpointerdown={onHistorySplitterDown}
+          onpointermove={onHistorySplitterMove}
+          onpointerup={onHistorySplitterUp}
+          onpointercancel={onHistorySplitterUp}
+          onkeydown={onHistorySplitterKeydown}
+        ></div>
+      {/if}
       <div class="side-head side-head--history">
-        <span>{t("history")}</span>
+        <!-- 标题本身是折叠开关：历史一多，目录树只剩一行可见。 -->
+        <button
+          class="side-head-toggle"
+          type="button"
+          aria-expanded={!$layoutStore.historyCollapsed}
+          aria-controls="history-list"
+          title={$layoutStore.historyCollapsed ? t("expandHistory") : t("collapseHistory")}
+          onclick={toggleHistory}
+        >
+          <span class="side-head-chevron">
+            <svg viewBox="0 0 12 12" width="10" height="10" fill="none" aria-hidden="true"
+              ><path
+                d="M3 4.5L6 7.5L9 4.5"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              /></svg
+            >
+          </span>
+          <span>{t("history")}</span>
+          {#if $appState.historyIndex.length}
+            <span class="side-head-count">{$appState.historyIndex.length}</span>
+          {/if}
+        </button>
         <button class="link-btn" type="button" onclick={confirmClearHistory}>{t("clear")}</button>
       </div>
-      <div class="side-list side-list--history">
-        <HistoryList {t} historyIndex={$appState.historyIndex} onopen={(id) => void openHistory(id)} />
-      </div>
+      {#if !$layoutStore.historyCollapsed}
+        <div
+          class="side-list side-list--history"
+          class:is-sized={typeof $layoutStore.historyRatio === "number" && $appState.historyIndex.length > 0}
+          style:--history-grow={historyGrow}
+          id="history-list"
+          bind:this={historyListEl}
+        >
+          <HistoryList {t} historyIndex={$appState.historyIndex} onopen={(id) => void openHistory(id)} />
+        </div>
+      {/if}
       <div class="side-foot hint">{$appState.storageAvailable ? "" : t("storageUnavailable")}</div>
     </aside>
 

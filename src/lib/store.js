@@ -84,12 +84,12 @@ export const collapsedFolders = writable(new Set());
 export const toast = writable(null);
 
 /**
- * 请求 / 响应分栏比例（0.25–0.75），仅影响布局。
+ * 界面布局偏好：请求 / 响应分栏比例、历史分组是否折叠、历史面板占多高。
  *
  * 单独存在 "layout" 键里，不写进请求快照：同一台机器上所有请求共用同一个偏好，
  * 也不会因为切换请求被草稿覆盖。
  */
-export const layout = writable({ split: 0.5 });
+export const layout = writable({ split: 0.5, historyCollapsed: false, historyRatio: null });
 
 let storage = null;
 let draftTimer = null;
@@ -134,14 +134,55 @@ export function clampSplit(value) {
   return Math.max(0.25, Math.min(0.75, parsed));
 }
 
+/** 把当前布局偏好整体写回同一个 "layout" 键。 */
+function persistLayout() {
+  if (storage) void storage.set("layout", get(layout));
+}
+
 /** 更新分栏比例并持久化（拖拽时高频调用，写存储做防抖）。 */
 export function setSplit(value) {
   const split = clampSplit(value);
-  layout.update((current) => (Math.abs(current.split - split) < 0.001 ? current : { split }));
+  layout.update((current) => (Math.abs(current.split - split) < 0.001 ? current : { ...current, split }));
   clearTimeout(splitTimer);
-  splitTimer = setTimeout(() => {
-    if (storage) void storage.set("layout", { split });
-  }, 400);
+  splitTimer = setTimeout(persistLayout, 400);
+}
+
+/**
+ * 折叠 / 展开历史分组。
+ *
+ * 历史最多 30 条，展开时会把侧栏剩余高度吃满，已保存的接口目录只剩几行可见；
+ * 折叠后这段高度让给目录树。折叠状态和分栏比例存在同一个 layout 键里，下次打开保持一致。
+ */
+export function toggleHistory() {
+  layout.update((current) => ({ ...current, historyCollapsed: !current.historyCollapsed }));
+  clearTimeout(splitTimer);
+  persistLayout();
+}
+
+/** 历史面板占比的合法区间：太小时一条记录都露不全，太大时目录树会被挤没。 */
+export const HISTORY_RATIO_MIN = 0.12;
+export const HISTORY_RATIO_MAX = 0.8;
+/** 没设置过时的占比：与历史列表自动占高的上限一致。 */
+const HISTORY_RATIO_DEFAULT = 0.35;
+
+export function clampHistoryRatio(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return HISTORY_RATIO_DEFAULT;
+  return Math.max(HISTORY_RATIO_MIN, Math.min(HISTORY_RATIO_MAX, parsed));
+}
+
+/**
+ * 设置历史面板占「已保存 + 历史两块列表可用高度」的比例。
+ *
+ * 比例而不是像素：侧栏高度变化时两块列表按同一比例缩放。没设置过时历史按内容占高，
+ * 第一次拖动分隔条后固定下来。
+ */
+export function setHistoryRatio(value) {
+  const historyRatio = clampHistoryRatio(value);
+  layout.update((current) => (current.historyRatio === historyRatio ? current : { ...current, historyRatio }));
+  // 拖拽时高频调用，和分栏比例共用同一个防抖计时器，反正写的都是整份 layout。
+  clearTimeout(splitTimer);
+  splitTimer = setTimeout(persistLayout, 400);
 }
 
 /** 更新默认超时设置并持久化。 */
@@ -304,8 +345,14 @@ export async function initialize() {
 
   const storedLayout = await storage.get("layout");
   if (storedLayout && typeof storedLayout === "object") {
-    const split = Number(/** @type {{ split?: unknown }} */ (storedLayout).split);
-    if (Number.isFinite(split)) layout.set({ split: clampSplit(split) });
+    const stored = /** @type {{ split?: unknown, historyCollapsed?: unknown, historyRatio?: unknown }} */ (storedLayout);
+    const split = Number(stored.split);
+    const ratio = stored.historyRatio;
+    layout.set({
+      split: Number.isFinite(split) ? clampSplit(split) : 0.5,
+      historyCollapsed: Boolean(stored.historyCollapsed),
+      historyRatio: ratio === null || ratio === undefined ? null : clampHistoryRatio(ratio),
+    });
   }
 
   if (draft && typeof draft === "object") applySnapshotToState(draft);
