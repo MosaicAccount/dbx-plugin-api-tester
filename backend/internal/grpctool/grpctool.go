@@ -51,6 +51,9 @@ type TargetParams struct {
 	SkipTLSVerify bool              `json:"skipTlsVerify"`
 	TimeoutMs     int               `json:"timeoutMs"`
 	Metadata      []common.KeyValue `json:"metadata"`
+	// UseProtoFiles 为 true 时用导入的 .proto 文件代替 Server Reflection 解析方法。
+	UseProtoFiles bool        `json:"useProtoFiles"`
+	ProtoFiles    []ProtoFile `json:"protoFiles"`
 }
 
 type DiscoveryParams struct {
@@ -116,7 +119,22 @@ type InvokeResult struct {
 }
 
 // Discover 列出目标服务端可用的 gRPC 服务。
+//
+// 导入了 proto 文件时直接从本地描述符里列服务，不再要求服务端开启 Reflection。
 func Discover(params DiscoveryParams) (any, *apperr.Error) {
+	started := time.Now()
+	if params.UseProtoFiles {
+		schema, pluginError := loadProtoSchema(params.ProtoFiles)
+		if pluginError != nil {
+			return nil, pluginError
+		}
+		return &ServicesResult{
+			Target:    params.Target,
+			Services:  schema.serviceNames(),
+			ElapsedMs: time.Since(started).Milliseconds(),
+		}, nil
+	}
+
 	connection, pluginError := dialGRPC(params.TargetParams)
 	if pluginError != nil {
 		return nil, pluginError
@@ -129,7 +147,6 @@ func Discover(params DiscoveryParams) (any, *apperr.Error) {
 	}
 	defer cancel()
 
-	started := time.Now()
 	services, err := listServices(ctx, connection)
 	if err != nil {
 		return nil, grpcReflectionError(err)
@@ -155,6 +172,23 @@ func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 		return nil, apperr.Invalid("Service name is required")
 	}
 
+	started := time.Now()
+	if params.UseProtoFiles {
+		schema, pluginError := loadProtoSchema(params.ProtoFiles)
+		if pluginError != nil {
+			return nil, pluginError
+		}
+		methods, err := schema.methodInfos(serviceName)
+		if err != nil {
+			return nil, apperr.Invalid(err.Error())
+		}
+		return &MethodsResult{
+			Service:   serviceName,
+			Methods:   methods,
+			ElapsedMs: time.Since(started).Milliseconds(),
+		}, nil
+	}
+
 	connection, pluginError := dialGRPC(params.TargetParams)
 	if pluginError != nil {
 		return nil, pluginError
@@ -167,7 +201,6 @@ func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 	}
 	defer cancel()
 
-	started := time.Now()
 	registry, err := loadFileRegistry(ctx, connection, serviceName)
 	if err != nil {
 		return nil, grpcReflectionError(err)
@@ -182,15 +215,7 @@ func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 	}
 	methods := make([]MethodInfo, 0, service.Methods().Len())
 	for index := 0; index < service.Methods().Len(); index++ {
-		method := service.Methods().Get(index)
-		methods = append(methods, MethodInfo{
-			Name:            string(method.Name()),
-			FullName:        fmt.Sprintf("/%s/%s", service.FullName(), method.Name()),
-			InputType:       string(method.Input().FullName()),
-			OutputType:      string(method.Output().FullName()),
-			ClientStreaming: method.IsStreamingClient(),
-			ServerStreaming: method.IsStreamingServer(),
-		})
+		methods = append(methods, methodInfoOf(service, service.Methods().Get(index)))
 	}
 	return &MethodsResult{
 		Service:   serviceName,
@@ -216,6 +241,16 @@ func Invoke(params InvokeParams) (any, *apperr.Error) {
 		methodName = full[index+1:]
 	}
 
+	// 先编译本地 proto：语法问题应该在发起连接之前就返回。
+	var schema *protoSchema
+	if params.UseProtoFiles {
+		loaded, pluginError := loadProtoSchema(params.ProtoFiles)
+		if pluginError != nil {
+			return nil, pluginError
+		}
+		schema = loaded
+	}
+
 	connection, pluginError := dialGRPC(params.TargetParams)
 	if pluginError != nil {
 		return nil, pluginError
@@ -228,13 +263,23 @@ func Invoke(params InvokeParams) (any, *apperr.Error) {
 	}
 	defer cancel()
 
-	registry, err := loadFileRegistry(ctx, connection, serviceName)
-	if err != nil {
-		return nil, grpcReflectionError(err)
-	}
-	method, err := findMethod(registry, serviceName, methodName)
-	if err != nil {
-		return nil, apperr.Invalid(err.Error())
+	var method protoreflect.MethodDescriptor
+	if schema != nil {
+		found, err := schema.findMethod(serviceName, methodName)
+		if err != nil {
+			return nil, apperr.Invalid(err.Error())
+		}
+		method = found
+	} else {
+		registry, err := loadFileRegistry(ctx, connection, serviceName)
+		if err != nil {
+			return nil, grpcReflectionError(err)
+		}
+		found, err := findMethod(registry, serviceName, methodName)
+		if err != nil {
+			return nil, apperr.Invalid(err.Error())
+		}
+		method = found
 	}
 
 	payloads := outboundPayloads(params)

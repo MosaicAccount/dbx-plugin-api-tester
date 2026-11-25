@@ -43,6 +43,7 @@ const (
 	KindTLS        Kind = "tls"
 	KindAuth       Kind = "auth"
 	KindReflection Kind = "reflection"
+	KindProto      Kind = "proto"
 	KindInternal   Kind = "internal"
 )
 
@@ -82,6 +83,14 @@ func (e *Error) Data() map[string]any {
 // Invalid 构造参数错误。
 func Invalid(format string, args ...any) *Error {
 	return &Error{Code: CodeInvalidParams, Kind: KindInvalid, Message: fmt.Sprintf(format, args...)}
+}
+
+// Proto 构造导入的 .proto 文件编译失败错误。
+//
+// 它不是网络问题，但仍属于调用方输入（文件内容）的问题，所以沿用 -32602；
+// 单独的 Kind 让前端能给出"检查 import 路径/语法"的排错提示。
+func Proto(format string, args ...any) *Error {
+	return &Error{Code: CodeInvalidParams, Kind: KindProto, Message: fmt.Sprintf(format, args...)}
 }
 
 // Upstream 构造上游执行错误。
