@@ -128,6 +128,51 @@ dbx-plugin package .
 带原生 sidecar 的插件只能在目标平台打包，不要用 `--target` 交叉打包；多平台发布走
 `.github/workflows/plugin-release.yml` 的矩阵。
 
+## 分支与版本号
+
+- **`main` 只允许正式版本号**：`main` 上的版本必须是可以直接发布、直接打 tag 的 `X.Y.Z`，
+  不允许出现 `-SNAPSHOT`、`-dev`、`-rc`、`-beta` 之类的后缀。在 `main` 上看到后缀，就说明
+  发版流程漏了收敛版本这一步。
+- **开发分支用「下一个正式版本 + 预发布后缀」**：长期开发分支 `dev` 和临时分支
+  `feat/*`、`fix/*` 都算开发分支。从 `main` 切出来后第一件事是把版本改成
+  `X.Y.(Z+1)-SNAPSHOT`（例：`main` 是 `0.1.0` → 开发分支写 `0.1.1-SNAPSHOT`），并单独提交
+  一次 `chore: 开发分支版本号切换到 0.1.1-SNAPSHOT`，不要和功能提交混在一起。有破坏性改动
+  或成组新特性时按 SemVer 取 `0.2.0-SNAPSHOT` / `1.0.0-SNAPSHOT`，不要为了省事一律 +1。
+- **后缀写法跟生态标准走，但同一时间只用一种**：本仓库统一用 `-SNAPSHOT`（DBX manifest 的
+  `version` 正则 `^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$` 和 npm semver 都接受）。
+  换到别的语言/生态就换成那边的标准写法（Java/Maven `-SNAPSHOT`、Rust `-alpha.N`、
+  Python `.devN`、Go 模块用伪版本或 `-dev.N`），不要自造 `-dev-final-v2` 这类没有标准
+  含义的后缀，否则升级比较和商店版本排序都会失去意义。
+- **开发分支的版本号不许发布**：`-SNAPSHOT` 产物只能本地 `dbx-plugin dev` 或内部安装验证，
+  不进 Release、不写商店候选、不动 `.dbx-store.json`。
+- **合回 `main` 后再收敛版本，然后才发版**：开发分支的功能合并进 `main` 后，先按下面的清单
+  把所有版本号位置从 `X.Y.Z-SNAPSHOT` 改成 `X.Y.Z`，跑一遍 `npm run build` 和后端测试，
+  单独提交 `chore(release): bump version to X.Y.Z`，按 PR 规范合入并推送到 `main`、确认 CI 全绿，
+  **最后**才打 annotated tag `vX.Y.Z` → `gh release create`。不要先打 tag 再补版本号，
+  也不要在发布后回头改 tag 或覆盖资产。
+- **每次发版后把开发分支推到下一版**：`main` 打出 `X.Y.Z` 之后，`dev` 先 merge（或 rebase 到）
+  `main`，再把版本提到 `X.Y.(Z+1)-SNAPSHOT`；否则开发分支带着已发布的版本号继续开发，
+  下次发版就对不上了。
+- **发版前逐项检查版本号**（漏一处就会让商店候选的 `version` 或 sidecar 身份与包内 manifest
+  对不上，签名阶段才会暴露）：
+
+  ```bash
+  # 1) 清单文件与 Go 常量：值必须都等于即将发布的 X.Y.Z
+  grep -n '"version"' manifest.json package.json package-lock.json   # lock 内有两处
+  grep -n 'pluginVersion =' backend/main.go
+
+  # 2) 文档与商店元数据里的版本引用
+  grep -n 'apitester-' README.md          # 本地产物名示例
+  grep -n 'tree/v' .dbx-store.json        # source 必须指向新 tag
+
+  # 3) 兜底：在即将发版的 main 上，除 AGENTS.md 的约定说明外不应再有 SNAPSHOT 残留
+  #    （在 dev 分支上这条会命中各版本文件本身，属正常）
+  grep -rn --exclude-dir={node_modules,dist,.git,.dbx-dev,sdk} 'SNAPSHOT' .
+  ```
+
+  不要跟着改的东西：`backend/go.mod` 里的 SDK `v0.1.0`、README 里历史 tag 的示例命令、
+  `scripts/*.test.mjs` 里的 `-0.1.0-`——它们是依赖版本、文档示例和测试夹具，不是插件版本。
+
 ## Git 提交
 
 - 只有用户明确要求时才提交。
@@ -161,10 +206,12 @@ dbx-plugin package .
 
 ## 发版与商店
 
-- **版本号四处同步**：`manifest.json`、`backend/main.go` 的 `pluginVersion`、`package.json`、
-  `package-lock.json`（lock 内两处），README 里的产物名示例一并改。`rpc_test.go` 里的版本是
-  测试夹具，不跟随。
-- **顺序**：版本提交经 PR 合入 `main` → 打 annotated tag `vX.Y.Z` → `gh release create`
+- **版本号必须已收敛为正式版**：`manifest.json`、`backend/main.go` 的 `pluginVersion`、
+  `package.json`、`package-lock.json`（lock 内两处）、README 里的产物名示例、`.dbx-store.json`
+  的 `source` 六处都要等于 `X.Y.Z` 且不带后缀，逐项清单见 `## 分支与版本号`。
+  `rpc_test.go` 里的版本是测试夹具，不跟随。
+- **顺序**：`X.Y.Z-SNAPSHOT` → `X.Y.Z` 的版本提交经 PR 合入 `main` 并确认 CI 全绿 →
+  打 annotated tag `vX.Y.Z` → `gh release create`
   （标题 `API Tester vX.Y.Z`，说明用中文写「变化 / 安装 / 校验」）。`plugin-release.yml` 监听
   `release: published`，五个平台各自构建（`darwin-arm64`、`darwin-x64`、`linux-x64`、
   `linux-arm64`、`windows-x64`）；本机不要 `--target` 交叉打包。
