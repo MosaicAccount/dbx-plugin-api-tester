@@ -457,8 +457,12 @@
           aria-expanded={Boolean(sideMenu)}
           aria-label={t("newAction")}
           title={t("newAction")}
-          onclick={(event) => openNewMenu("", event.currentTarget)}>+</button
+          onclick={(event) => openNewMenu("", event.currentTarget)}
         >
+          <svg viewBox="0 0 13 13" width="13" height="13" fill="none" aria-hidden="true"
+            ><path d="M6.5 2.9v7.2M2.9 6.5h7.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg
+          >
+        </button>
       </div>
       <div class="side-list" bind:this={savedListEl}>
         <SavedTree

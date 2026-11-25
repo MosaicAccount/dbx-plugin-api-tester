@@ -926,12 +926,18 @@ textarea {
   cursor: pointer;
 }
 
+/*
+ * 图标按钮：内容统一用内联 SVG，定宽高 + flex 居中。
+ * 用字符（×、+）会因为字体 ascent/descent 不对称而偏离几何中心。
+ */
 .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 20px;
   height: 20px;
+  padding: 0;
   border-radius: 5px;
-  font-size: 16px;
-  line-height: 1;
 }
 
 .icon-btn:hover,
@@ -1294,13 +1300,16 @@ textarea {
 }
 
 .kv-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 22px;
   height: 22px;
   border: 0;
   border-radius: 5px;
+  padding: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 15px;
   cursor: pointer;
 }
 

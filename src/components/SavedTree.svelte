@@ -261,8 +261,12 @@
           onclick={(event) => {
             event.stopPropagation();
             ondelete?.(item.id);
-          }}>×</button
+          }}
         >
+          <svg viewBox="0 0 13 13" width="13" height="13" fill="none" aria-hidden="true"
+            ><path d="M3.2 3.2l6.6 6.6M9.8 3.2l-6.6 6.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg
+          >
+        </button>
       </span>
     </div>
   </div>
@@ -316,8 +320,12 @@
         onclick={(event) => {
           event.stopPropagation();
           onadd?.(node.path, event.currentTarget);
-        }}>+</button
+        }}
       >
+        <svg viewBox="0 0 13 13" width="13" height="13" fill="none" aria-hidden="true"
+          ><path d="M6.5 2.9v7.2M2.9 6.5h7.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg
+        >
+      </button>
       <button
         class="icon-btn folder-delete"
         type="button"
@@ -326,8 +334,12 @@
         onclick={(event) => {
           event.stopPropagation();
           ondeletefolder?.(node.path);
-        }}>×</button
+        }}
       >
+        <svg viewBox="0 0 13 13" width="13" height="13" fill="none" aria-hidden="true"
+          ><path d="M3.2 3.2l6.6 6.6M9.8 3.2l-6.6 6.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg
+        >
+      </button>
     </span>
   </div>
   {#if !collapsed}
