@@ -19,6 +19,7 @@
     discoverGrpc,
     folderDeleteStats,
     initialize,
+    installStreamUnloadCleanup,
     invokeGrpc,
     layout as layoutStore,
     listFolders,
@@ -116,9 +117,12 @@
     };
     window.addEventListener("dbx-plugin-env", onEnv);
     window.addEventListener("keydown", onKeydown);
+    // 关标签页/刷新时尽力关掉会话，缩短服务端连接的残留时间（失败靠 TTL 兜底）。
+    const disposeUnloadCleanup = installStreamUnloadCleanup();
     return () => {
       window.removeEventListener("dbx-plugin-env", onEnv);
       window.removeEventListener("keydown", onKeydown);
+      disposeUnloadCleanup();
     };
   });
 

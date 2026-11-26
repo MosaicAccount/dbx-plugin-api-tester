@@ -1804,6 +1804,54 @@ export async function closeGrpcStream() {
   return true;
 }
 
+/**
+ * 页面即将销毁时的最佳努力清理。
+ *
+ * 关闭标签页 / 刷新时，前端没有可靠的卸载回调：页面一销毁，后续调用就发不出去。
+ * 不清理的话，sidecar 里的会话要等空闲 TTL（3 分钟）才回收，期间：
+ *  - 服务端仍认为订阅有效；
+ *  - 消息继续入队并在满后丢弃；
+ *  - 连续开关标签页会撞上“最多 4 条会话”的上限。
+ *
+ * 这里只做优化，不承担正确性：请求可能根本到不了（桥是 postMessage，页面可能先被销毁），
+ * 失败一律忽略，正确性仍由 sidecar 的 TTL 兜底。
+ */
+function flushStreamOnUnload() {
+  const id = current().stream.id;
+  if (!id || !host.available) return;
+  try {
+    // 不 await：页面正在销毁，拿不到结果，也没有需要恢复的状态。
+    void host.invoke("grpc/stream/close", { streamId: id }, { timeoutMs: 2000 });
+  } catch {
+    // 宿主已不可用，交给 TTL。
+  }
+}
+
+let unloadCleanupInstalled = false;
+
+/**
+ * 注册 pagehide 清理，返回注销函数（给 onMount 用）。
+ *
+ * 用 pagehide 而不是 beforeunload：后者在移动端与 bfcache 场景不可靠。
+ * bfcache 把页面“冻结”时也会触发 pagehide（persisted = true），那种情况页面之后可能
+ * 原样恢复，不算离开，不能关会话。
+ */
+export function installStreamUnloadCleanup() {
+  if (unloadCleanupInstalled || typeof window === "undefined") return () => {};
+  unloadCleanupInstalled = true;
+
+  const onPageHide = (event) => {
+    if (event?.persisted) return;
+    flushStreamOnUnload();
+  };
+  window.addEventListener("pagehide", onPageHide);
+
+  return () => {
+    window.removeEventListener("pagehide", onPageHide);
+    unloadCleanupInstalled = false;
+  };
+}
+
 /** 打开历史的「选项」时展示的取值；超出范围按边界收敛。 */
 export function normalizeStreamSettings(value) {
   return {
