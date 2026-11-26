@@ -620,6 +620,7 @@
           <GrpcRequestHead
             {t}
             grpc={$appState.grpc}
+            stream={$appState.stream}
             sending={$appState.sending}
             discovering={$appState.discovering}
             canceling={$appState.canceling}
@@ -636,6 +637,7 @@
             <GrpcPanel
               {t}
               grpc={$appState.grpc}
+              stream={$appState.stream}
               sending={$appState.sending}
               defaultTimeout={$appState.settings.grpcTimeoutMs}
             />
@@ -665,6 +667,7 @@
           response={$appState.response}
           responseTab={$appState.responseTab}
           protocol={$appState.protocol}
+          stream={$appState.stream}
           canceling={$appState.canceling}
         />
       </div>

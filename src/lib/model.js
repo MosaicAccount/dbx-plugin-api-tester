@@ -23,6 +23,22 @@ export const PROTO_FILE_LIMIT = 128 * 1024;
 export const PROTO_TOTAL_LIMIT = 160 * 1024;
 export const PROTO_FILE_COUNT_LIMIT = 64;
 
+/**
+ * 交互式会话（客户端流 / 双向流）的时限。
+ *
+ * 默认值与后端 stream_session.go 保持一致；后端还会再校验一次，
+ * 前端先收敛是为了让用户在失焦时就看到合法值，而不是点了发送才报错。
+ */
+export const STREAM_WAIT_DEFAULT = 20000;
+export const STREAM_WAIT_MIN = 5000;
+export const STREAM_WAIT_MAX = 60000;
+export const STREAM_IDLE_DEFAULT = 180000;
+export const STREAM_IDLE_MIN = 30000;
+export const STREAM_IDLE_MAX = 900000;
+export const STREAM_DURATION_DEFAULT = 1800000;
+export const STREAM_DURATION_MIN = 60000;
+export const STREAM_DURATION_MAX = 7200000;
+
 export const IS_MAC =
   typeof navigator === "undefined" ? false : /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
 export const SAVE_SHORTCUT = IS_MAC ? "⌘S" : "Ctrl+S";
@@ -74,8 +90,29 @@ export function defaultGrpc(settings) {
     // 空白保持空字符串，让编辑器显示"输入 JSON 消息"的占位提示，而不是看起来像真实内容的 {}。
     messages: [""],
     timeoutMs: clampNumber(settings?.grpcTimeoutMs, GRPC_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX),
+    // 交互式会话（客户端流 / 双向流）的时限；一元与服务端流不使用。
+    stream: defaultStreamOptions(),
     services: [],
     methods: [],
+  };
+}
+
+/** 交互式会话的时限选项，随请求快照一起保存。 */
+export function defaultStreamOptions() {
+  return {
+    waitMs: STREAM_WAIT_DEFAULT,
+    idleTimeoutMs: STREAM_IDLE_DEFAULT,
+    maxDurationMs: STREAM_DURATION_DEFAULT,
+  };
+}
+
+/** 归一化会话时限；缺失或非法值回落到默认，超出范围按边界收敛。 */
+export function normalizeStreamOptions(value) {
+  const options = value && typeof value === "object" ? value : {};
+  return {
+    waitMs: clampNumber(options.waitMs, STREAM_WAIT_DEFAULT, STREAM_WAIT_MIN, STREAM_WAIT_MAX),
+    idleTimeoutMs: clampNumber(options.idleTimeoutMs, STREAM_IDLE_DEFAULT, STREAM_IDLE_MIN, STREAM_IDLE_MAX),
+    maxDurationMs: clampNumber(options.maxDurationMs, STREAM_DURATION_DEFAULT, STREAM_DURATION_MIN, STREAM_DURATION_MAX),
   };
 }
 
@@ -421,6 +458,7 @@ export function applySnapshot(snapshot, settings) {
     timeoutMs: clampNumber(grpc.timeoutMs, defaults.grpcTimeoutMs, 1, TIMEOUT_MAX),
     tls: Boolean(grpc.tls),
     skipTlsVerify: Boolean(grpc.skipTlsVerify),
+    stream: normalizeStreamOptions(grpc.stream),
   };
 
   next.responseTab = snapshot.responseTab === "headers" ? "headers" : "body";
@@ -453,6 +491,7 @@ export function toSnapshot(state) {
       metadata: state.grpc.metadata.map((row) => ({ ...row })),
       messages: trimGrpcMessages(state.grpc.messages),
       timeoutMs: state.grpc.timeoutMs,
+      stream: normalizeStreamOptions(state.grpc.stream),
     },
     responseTab: state.responseTab,
   };

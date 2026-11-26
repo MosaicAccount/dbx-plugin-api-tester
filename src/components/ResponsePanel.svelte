@@ -9,7 +9,64 @@
   import { ERROR_HINT_KEYS, formatBytes, statusTone } from "../lib/model.js";
   import { cancelCurrentRequest, copyResponse, setResponseTab } from "../lib/store.js";
 
-  let { t, response = null, responseTab = "body", protocol = "http", canceling = false } = $props();
+  let {
+    t,
+    response = null,
+    responseTab = "body",
+    protocol = "http",
+    stream = null,
+    canceling = false,
+  } = $props();
+
+  /**
+   * 交互式会话期间，右栏显示的是「时间线」而不是一次性响应：
+   * 发出与收到按到达顺序排列，服务端的回复不挂在某条消息下面。
+   */
+  const timeline = $derived(Array.isArray(stream?.timeline) ? stream.timeline : []);
+  const showTimeline = $derived(protocol === "grpc" && timeline.length > 0);
+  const streamStateLabel = $derived.by(() => {
+    switch (stream?.state) {
+      case "connecting":
+        return t("connecting");
+      case "open":
+        return stream?.kind === "server" ? t("streamReceiving") : t("streamOpen");
+      case "halfClosed":
+        // 客户端流是"等那一条响应"，双向流是"继续收"。
+        return stream?.kind === "client" ? t("streamWaitingReply") : t("streamHalfClosed");
+      case "ended":
+        return t("streamEnded");
+      case "error":
+        return t("streamError");
+      default:
+        return "";
+    }
+  });
+
+  // 等待回复时每秒刷新一次，让用户看到"已经等了多久"，而不是干等着转圈。
+  let now = $state(Date.now());
+  $effect(() => {
+    if (stream?.state !== "halfClosed") return;
+    const timer = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
+  const waitedSeconds = $derived(
+    stream?.waitingSince ? Math.max(0, Math.round((now - stream.waitingSince) / 1000)) : 0,
+  );
+
+  function entryLabel(entry) {
+    switch (entry.type) {
+      case "out":
+        return `${t("sendMessage")} #${entry.seq}`;
+      case "in":
+        return `#${entry.seq}`;
+      case "status":
+        return entry.status?.name || "status";
+      case "error":
+        return t("streamError");
+      default:
+        return "";
+    }
+  }
 
   // 响应面板必须用"响应"语义的标签：请求面板已经占用了「请求体 / 请求头」，
   // 这里沿用同一组文案会让人以为看到的是刚刚填的请求。
@@ -146,7 +203,32 @@
   </div>
 
   <div class="response-body">
-    {#if !response}
+    {#if showTimeline}
+      <div class="timeline" role="log" aria-live="polite" aria-label={t("response")}>
+        <div class="timeline-head">
+          <span class="timeline-state" data-tone={stream?.state === "error" ? "err" : stream?.state === "ended" ? "done" : "live"}>
+            {streamStateLabel}
+          </span>
+          {#if stream?.state === "halfClosed" && waitedSeconds > 0}
+            <span class="timeline-wait">{t("streamWaitedSeconds", { seconds: waitedSeconds })}</span>
+          {/if}
+          {#if stream?.dropped > 0}
+            <span class="pill pill--warn">{t("streamDropped", { count: stream.dropped })}</span>
+          {/if}
+        </div>
+        {#each timeline as entry, index (index)}
+          <div class="timeline-row" data-type={entry.type}>
+            <span class="timeline-at">{entry.at ? `${entry.at} ms` : ""}</span>
+            <span class="timeline-label">{entryLabel(entry)}</span>
+            {#if entry.type === "note"}
+              <span class="timeline-note">{entry.text}</span>
+            {:else if entry.text}
+              <pre class="timeline-body">{entry.text}</pre>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {:else if !response}
       <div class="response-empty">
         <strong>{t("emptyResponse")}</strong>
         <span>{t("emptyResponseHint")}</span>
@@ -270,6 +352,111 @@
 {/snippet}
 
 <style>
+  .timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    overflow: auto;
+    height: 100%;
+    font-size: 12px;
+  }
+
+  .timeline-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .timeline-state {
+    font-weight: 600;
+    color: var(--muted);
+  }
+
+  .timeline-state[data-tone="live"] {
+    color: var(--accent, #2f9e73);
+  }
+
+  .timeline-wait {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+  }
+
+  .timeline-state[data-tone="err"] {
+    color: var(--danger, #c0442f);
+  }
+
+  .timeline-row {
+    display: grid;
+    grid-template-columns: 62px 92px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    padding: 4px 6px;
+    border-left: 2px solid transparent;
+    background: var(--surface-2, transparent);
+    border-radius: 3px;
+  }
+
+  .timeline-row[data-type="out"] {
+    border-left-color: var(--primary, #3b6fd4);
+  }
+
+  .timeline-row[data-type="in"] {
+    border-left-color: var(--accent, #2f9e73);
+  }
+
+  .timeline-row[data-type="status"] {
+    border-left-color: var(--muted);
+  }
+
+  .timeline-row[data-type="error"] {
+    border-left-color: var(--danger, #c0442f);
+  }
+
+  .timeline-row[data-type="note"] {
+    border-left-color: var(--border);
+    opacity: 0.75;
+  }
+
+  .timeline-at {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+  }
+
+  .timeline-label {
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .timeline-note {
+    color: var(--muted);
+  }
+
+  .timeline-body {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  @media (max-width: 620px) {
+    .timeline-row {
+      grid-template-columns: 52px minmax(0, 1fr);
+    }
+
+    .timeline-body {
+      grid-column: 1 / -1;
+      padding-left: 0;
+    }
+  }
   .grow {
     flex: 1;
   }

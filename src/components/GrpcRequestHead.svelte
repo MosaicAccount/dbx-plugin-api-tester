@@ -22,6 +22,9 @@
   import {
     addGrpcProtoFiles,
     cancelCurrentRequest,
+    closeGrpcStream,
+    connectGrpc,
+    finishGrpcStream,
     discoverGrpc,
     invokeGrpc,
     loadGrpcMethods,
@@ -36,6 +39,7 @@
   let {
     t,
     grpc,
+    stream = null,
     sending = false,
     discovering = false,
     canceling = false,
@@ -48,6 +52,38 @@
   let dragActive = $state(false);
 
   const fileMode = $derived(grpc.schemaMode === "file");
+  /**
+   * 客户端流与双向流可以逐条发送：顶部按钮变成「连接 / 终止」，
+   * 一元与服务端流保持原来的「调用」。
+   */
+  const methodInfo = $derived(grpc.methods.find((item) => item.name === grpc.method) || null);
+  /** 需要建会话的方法：服务端流、客户端流、双向流。一元仍然是一次性调用。 */
+  const sessionMethod = $derived(Boolean(methodInfo?.serverStreaming || methodInfo?.clientStreaming));
+  /** 可以逐条发送的方法：只有客户端流与双向流。 */
+  const interactive = $derived(Boolean(methodInfo?.clientStreaming));
+  const serverOnly = $derived(Boolean(methodInfo?.serverStreaming && !methodInfo?.clientStreaming));
+  const streamActive = $derived(
+    Boolean(stream?.id) && ["connecting", "open", "halfClosed"].includes(stream.state),
+  );
+  const sentCount = $derived(Number(stream?.outSeq) || 0);
+  // 服务端流没有"已发送"的概念，显示已收到的条数更有意义。
+  const pillCount = $derived(serverOnly ? Number(stream?.inSeq) || 0 : sentCount);
+  const canFinish = $derived(stream?.state === "open" && !stream?.busy && !sending);
+  const streamLabel = $derived.by(() => {
+    switch (stream?.state) {
+      case "connecting":
+        return t("connecting");
+      case "halfClosed":
+        // 客户端流半关闭后是"等那一条响应"，双向流是"继续收"，措辞要分开。
+        return stream?.kind === "client" ? t("streamWaitingReply") : t("streamHalfClosed");
+      case "open":
+        return stream?.kind === "server" ? t("streamReceiving") : t("streamOpen");
+      default:
+        return t("streamOpen");
+    }
+  });
+
+  /** 服务端流点完「发送」会持续接收；一元不会，所以只有它需要这句说明。 */
   const protoFiles = $derived(Array.isArray(grpc.protoFiles) ? grpc.protoFiles : []);
   const protoBytes = $derived(protoFiles.reduce((total, file) => total + byteLength(file.content), 0));
 
@@ -72,12 +108,33 @@
     return services.map((name) => ({ value: name, label: name }));
   });
 
+  /** 方法类型标签：一元 / 服务端流 / 客户端流 / 双向流。 */
+  function kindLabel(info) {
+    if (!info) return "";
+    if (info.clientStreaming) return t(info.serverStreaming ? "bidiStreaming" : "clientStreaming");
+    return t(info.serverStreaming ? "serverStreaming" : "unaryShort");
+  }
+
+  /** 标签配色复用侧栏 GET / GRPC 那套 token，四类方法各有颜色。 */
+  function kindTone(info) {
+    if (!info) return "other";
+    if (info.clientStreaming) return info.serverStreaming ? "post" : "put";
+    return info.serverStreaming ? "head" : "other";
+  }
+
   const methodItems = $derived.by(() => {
     if (fileMode && !protoFiles.length) return [];
+    const byName = new Map(grpc.methods.map((method) => [method.name, method]));
     let names = grpc.methods.map((method) => method.name);
     if (grpc.method && !names.includes(grpc.method)) names = [grpc.method, ...names];
     if (!names.length) return [{ value: "", label: t(fileMode ? "parseFirstMethod" : "discoverFirst"), disabled: true }];
-    return names.map((name) => ({ value: name, label: name }));
+    // 带类型标签：选方法时就能看出它是一元还是流式，不用先选中再读签名行。
+    return names.map((name) => ({
+      value: name,
+      label: name,
+      badge: kindLabel(byName.get(name)),
+      tone: kindTone(byName.get(name)),
+    }));
   });
 
   const signature = $derived.by(() => {
@@ -85,14 +142,7 @@
     if (!grpc.method) return "";
     const info = grpc.methods.find((method) => method.name === grpc.method);
     if (!info) return grpc.service ? `${grpc.service}/${grpc.method}` : grpc.method;
-    const kind = info.clientStreaming
-      ? info.serverStreaming
-        ? t("bidiStreaming")
-        : t("clientStreaming")
-      : info.serverStreaming
-        ? t("serverStreaming")
-        : t("unary");
-    return `${info.inputType} → ${info.outputType} · ${kind}`;
+    return `${info.inputType} → ${info.outputType}`;
   });
 
   function onTargetInput(value) {
@@ -301,7 +351,44 @@
         {fileMode ? t("parseProto") : t("discover")}
       </button>
     {/if}
-    {#if sending}
+    {#if sessionMethod}
+      {#if streamActive}
+        <!-- 连接状态占用「连接」按钮的位置：不再单开一行状态条。 -->
+        <span class="stream-pill" data-tone={stream?.state === "connecting" ? "idle" : "live"}>
+          <span class="stream-dot" aria-hidden="true"></span>
+          {streamLabel}{#if pillCount > 0}<span class="stream-count">· {t("streamSentShort", { count: pillCount })}</span>{/if}
+        </span>
+        {#if interactive}
+          <button
+            class="btn btn-secondary"
+            type="button"
+            title={t("finishSendingHint")}
+            disabled={!canFinish}
+            onclick={() => void finishGrpcStream()}
+          >
+            {stream?.state === "halfClosed" ? t("finishedSending") : t("finishSending")}
+          </button>
+        {/if}
+        <button
+          class="btn btn-ghost btn-sm stream-stop"
+          type="button"
+          title={t("stopStreamHint")}
+          disabled={stream?.busy === "close"}
+          onclick={() => void closeGrpcStream()}
+        >
+          {t("stopStream")}
+        </button>
+      {:else}
+        <button
+          class="btn btn-primary"
+          type="button"
+          disabled={sending || discovering || stream?.busy === "close"}
+          onclick={() => void connectGrpc()}
+        >
+          {serverOnly ? t("send") : t("connect")}
+        </button>
+      {/if}
+    {:else if sending}
       <button
         class="btn btn-danger"
         type="button"
@@ -313,7 +400,7 @@
       </button>
     {:else}
       <button class="btn btn-primary" type="button" disabled={discovering} onclick={() => void invokeGrpc()}>
-        {t("invoke")}
+        {t("send")}
       </button>
     {/if}
   </div>
@@ -438,6 +525,7 @@
 
   <div class="grpc-signature">{signature}</div>
 
+
   <input
     class="visually-hidden"
     type="file"
@@ -451,6 +539,43 @@
 </div>
 
 <style>
+  .stream-stop {
+    color: var(--muted);
+  }
+
+  .stream-stop:hover:not(:disabled) {
+    color: var(--danger, #c0442f);
+  }
+
+  .stream-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm, 6px);
+    font-size: 12px;
+    color: var(--fg);
+    white-space: nowrap;
+  }
+
+  .stream-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+
+  .stream-pill[data-tone="live"] .stream-dot {
+    background: var(--success, #2f9e73);
+  }
+
+  .stream-count {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
   .grpc-head.is-dragging {
     outline: 2px dashed var(--primary);
     outline-offset: -4px;

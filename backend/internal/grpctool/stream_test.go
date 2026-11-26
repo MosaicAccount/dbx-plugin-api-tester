@@ -43,6 +43,21 @@ func (s *streamingServer) StreamingInputCall(
 	}
 }
 
+// StreamingOutputCall 按 response_parameters 里每项的 size 依次推送响应。
+// 会话层用它验证"服务端流可以持续推送、由用户终止"。
+func (s *streamingServer) StreamingOutputCall(
+	request *testpb.StreamingOutputCallRequest,
+	stream grpc.ServerStreamingServer[testpb.StreamingOutputCallResponse],
+) error {
+	for _, parameter := range request.GetResponseParameters() {
+		payload := &testpb.Payload{Body: make([]byte, parameter.GetSize())}
+		if err := stream.Send(&testpb.StreamingOutputCallResponse{Payload: payload}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // FullDuplexCall 严格一问一答：收到一条立刻回一条，模拟真实的交互式服务。
 func (s *streamingServer) FullDuplexCall(
 	stream grpc.BidiStreamingServer[testpb.StreamingOutputCallRequest, testpb.StreamingOutputCallResponse],

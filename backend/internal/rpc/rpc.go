@@ -26,6 +26,12 @@ const (
 	MethodGRPCServices  = "grpc/services"
 	MethodGRPCMethods   = "grpc/methods"
 	MethodGRPCInvoke    = "grpc/invoke"
+
+	MethodGRPCStreamOpen      = "grpc/stream/open"
+	MethodGRPCStreamSend      = "grpc/stream/send"
+	MethodGRPCStreamWait      = "grpc/stream/wait"
+	MethodGRPCStreamHalfClose = "grpc/stream/halfClose"
+	MethodGRPCStreamClose     = "grpc/stream/close"
 )
 
 // Methods 返回已实现的方法列表，供 ping 自检与文档使用。
@@ -36,6 +42,11 @@ func Methods() []string {
 		MethodGRPCServices,
 		MethodGRPCMethods,
 		MethodGRPCInvoke,
+		MethodGRPCStreamOpen,
+		MethodGRPCStreamSend,
+		MethodGRPCStreamWait,
+		MethodGRPCStreamHalfClose,
+		MethodGRPCStreamClose,
 	}
 }
 
@@ -66,12 +77,25 @@ type Handler struct {
 	id       string
 	version  string
 	inflight *inflight.Registry
+	streams  *grpctool.StreamManager
 }
 
 // New 构造分发器。id 与 version 必须与 manifest.json 一致，
 // 否则宿主会以 "Sidecar identity does not match manifest" 拒绝启动。
 func New(id, version string) *Handler {
-	return &Handler{id: id, version: version, inflight: inflight.New()}
+	return &Handler{
+		id:       id,
+		version:  version,
+		inflight: inflight.New(),
+		streams:  grpctool.NewStreamManager(),
+	}
+}
+
+// Close 释放会话与回收协程。进程退出时由内核回收；测试和热重载应显式调用。
+func (h *Handler) Close() {
+	if h.streams != nil {
+		h.streams.CloseAll()
+	}
 }
 
 // Dispatch 把一次调用路由到具体实现。
@@ -152,6 +176,44 @@ func (h *Handler) Dispatch(method string, params json.RawMessage) (any, *apperr.
 		}
 		defer release()
 		return grpctool.Invoke(ctx, request.InvokeParams)
+
+	case MethodGRPCStreamOpen:
+		var request grpctool.OpenStreamParams
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		return h.streams.Open(context.Background(), request)
+
+	case MethodGRPCStreamSend:
+		var request grpctool.SendStreamParams
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		return h.streams.Send(request)
+
+	case MethodGRPCStreamWait:
+		var request grpctool.WaitStreamParams
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		return h.streams.Wait(request)
+
+	case MethodGRPCStreamHalfClose:
+		var request grpctool.HalfCloseStreamParams
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		return h.streams.HalfClose(request)
+
+	case MethodGRPCStreamClose:
+		var request grpctool.CloseStreamParams
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		if err := h.streams.Close(request); err != nil {
+			return nil, err
+		}
+		return struct{}{}, nil
 
 	default:
 		return nil, apperr.MethodNotFound(method)

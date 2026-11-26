@@ -11,6 +11,15 @@ import {
   PROTO_FILE_LIMIT,
   PROTO_TOTAL_LIMIT,
   SAVE_LIMIT,
+  STREAM_DURATION_DEFAULT,
+  STREAM_DURATION_MAX,
+  STREAM_DURATION_MIN,
+  STREAM_IDLE_DEFAULT,
+  STREAM_IDLE_MAX,
+  STREAM_IDLE_MIN,
+  STREAM_WAIT_DEFAULT,
+  STREAM_WAIT_MAX,
+  STREAM_WAIT_MIN,
   TIMEOUT_MAX,
   applySnapshot,
   blankKV,
@@ -32,7 +41,6 @@ import {
   requestMethod,
   summarize,
   toSnapshot,
-  trimGrpcMessages,
   truncate,
   uid,
 } from "./model.js";
@@ -72,8 +80,40 @@ function createInitialState() {
     discovering: false,
     /** 已发出终止指令，等 sidecar 收尾。 */
     canceling: false,
+    /** 交互式会话（客户端流 / 双向流）的运行期状态；不持久化，见 createStreamState。 */
+    stream: createStreamState(),
   };
 }
+
+/**
+ * 交互式会话的运行期状态。
+ *
+ * 它和 grpc 配置分开：配置会存进草稿与历史，会话（消息时间线、已发送序号）
+ * 无法重放，也不该跟着请求一起保存。
+ */
+function createStreamState() {
+  return {
+    id: "",
+    kind: "", // client | bidi
+    state: "idle", // idle | connecting | open | halfClosed | ended | error
+    outSeq: 0,
+    inSeq: 0,
+    /** 消息下标 → 该消息实际发出的 outSeq。 */
+    sent: {},
+    timeline: [],
+    dropped: 0,
+    busy: null, // send | finish | close
+    receiving: false,
+    startedAt: 0,
+    /** 半关闭后开始等待回复的时刻；用来在界面上显示已经等了多久。 */
+    waitingSince: 0,
+    error: null,
+    status: null,
+  };
+}
+
+/** 时间线最多保留的条目数；交互式会话可以很长，界面只保留最近一段。 */
+const STREAM_TIMELINE_LIMIT = 400;
 
 export const state = writable(createInitialState());
 
@@ -361,6 +401,8 @@ export async function initialize() {
 /** 把一份快照写入表单状态。 */
 export function applySnapshotToState(snapshot) {
   const normalized = applySnapshot(snapshot, current().settings);
+  // 旧会话属于上一个请求；不关就会在 sidecar 里留着一条没人用的流。
+  resetStreamSession("", false);
   update((s) => ({
     ...s,
     protocol: normalized.protocol,
@@ -413,6 +455,7 @@ async function hydrateGrpcMethods() {
 
 export function setProtocol(protocol) {
   if (protocol !== "http" && protocol !== "grpc") return;
+  if (current().protocol !== protocol) resetStreamSession("", false);
   update((s) => ({
     ...s,
     protocol,
@@ -428,13 +471,24 @@ export function patchHttp(patch) {
   scheduleDraftPersist();
 }
 
+/** 建流时定死的参数；改了就等同于"需要重连"，直接结束当前会话。 */
+const SESSION_PARAM_KEYS = ["target", "tls", "skipTlsVerify", "metadata"];
+
+function closeStreamForParamChange(patch) {
+  if (!current().stream.id) return;
+  if (!SESSION_PARAM_KEYS.some((key) => Object.prototype.hasOwnProperty.call(patch, key))) return;
+  resetStreamSession(t("streamParamsChanged"));
+}
+
 export function patchGrpc(patch) {
+  closeStreamForParamChange(patch);
   update((s) => ({ ...s, grpc: { ...s.grpc, ...patch } }));
   scheduleDraftPersist();
 }
 
 /** 更新某个键值列表中的一行。用不可变更新，让 Svelte 准确感知变化。 */
 export function patchKV(scope, listName, index, patch) {
+  if (scope === "grpc" && listName === "metadata") closeStreamForParamChange({ metadata: true });
   update((s) => {
     const rows = s[scope][listName].map((row, i) => (i === index ? { ...row, ...patch } : row));
     return { ...s, [scope]: { ...s[scope], [listName]: rows } };
@@ -481,17 +535,22 @@ export function setGrpcMethods(methods) {
 }
 
 export function setGrpcService(service) {
-  update((s) => ({ ...s, grpc: { ...s.grpc, service, method: "", methods: [] } }));
+  if (service === current().grpc.service) return;
+  resetStreamSession("", false);
+  // 服务变了，输入消息的 schema 也随之变化：旧响应和旧请求体都不再成立。
+  update((s) => ({
+    ...s,
+    grpc: { ...s.grpc, service, method: "", methods: [], messages: [""] },
+    response: null,
+  }));
   scheduleDraftPersist();
 }
 
 export function setGrpcMethod(method) {
-  update((s) => {
-    if (s.grpc.method === method) return s;
-    // 换方法时把尾部空消息收掉：旧方法留下的空编辑器对新方法没有意义，
-    // 也容易让人以为界面"默认带了很多消息"。
-    return { ...s, grpc: { ...s.grpc, method, messages: trimGrpcMessages(s.grpc.messages) } };
-  });
+  if (method === current().grpc.method) return;
+  resetStreamSession("", false);
+  // 方法变了：输入类型可能完全不同，旧请求体不能继续留着，旧响应也不再对应当前方法。
+  update((s) => ({ ...s, grpc: { ...s.grpc, method, messages: [""] }, response: null }));
   scheduleDraftPersist();
 }
 
@@ -504,9 +563,11 @@ export function setGrpcMethod(method) {
 export function setGrpcSchemaMode(mode) {
   if (mode !== "file" && mode !== "reflection") return;
   if (current().grpc.schemaMode === mode) return;
+  resetStreamSession("", false);
   update((s) => ({
     ...s,
-    grpc: { ...s.grpc, schemaMode: mode, services: [], service: "", methods: [], method: "" },
+    grpc: { ...s.grpc, schemaMode: mode, services: [], service: "", methods: [], method: "", messages: [""] },
+    response: null,
   }));
   scheduleDraftPersist();
   if (mode === "file" && current().grpc.protoFiles.length) void discoverGrpc();
@@ -645,6 +706,7 @@ export function formatGrpcMessage(index) {
 
 export function newRequest(folder) {
   const target = normalizeFolder(folder);
+  resetStreamSession("", false);
   update((s) => ({
     ...s,
     activeSavedId: null,
@@ -1328,6 +1390,427 @@ async function invokeGrpcInternal() {
     scheduleDraftPersist();
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// 交互式会话（客户端流 / 双向流）
+// ---------------------------------------------------------------------------
+//
+// 阶段一采用「拉」：每次点击只发一次短 RPC，真正的流由 sidecar 的会话表持有。
+// 界面从不直接读网络，wait 只是从 sidecar 的队列里取；这既不需要事件通道，
+// 也不会出现"用户不点就收不到"以外的能力缺口。
+
+/** 接收循环的代数。切换请求或重连后旧循环必须失效，否则会把结果写到新会话上。 */
+let streamGen = 0;
+
+function streamOf() {
+  return current().stream;
+}
+
+function patchStream(patch) {
+  update((s) => ({ ...s, stream: { ...s.stream, ...patch } }));
+}
+
+function pushTimeline(entries) {
+  if (!entries.length) return;
+  update((s) => {
+    const next = [...s.stream.timeline, ...entries];
+    const trimmed = next.length > STREAM_TIMELINE_LIMIT ? next.slice(next.length - STREAM_TIMELINE_LIMIT) : next;
+    return { ...s, stream: { ...s.stream, timeline: trimmed } };
+  });
+}
+
+/** 时间线条目带上相对会话开始的毫秒数，界面不用自己算。 */
+function timelineEntry(type, payload = {}) {
+  const startedAt = current().stream.startedAt;
+  return { type, at: startedAt ? Date.now() - startedAt : 0, ...payload };
+}
+
+/** 状态名单独展示；这里只保留服务端给的说明，避免同一句 OK 出现两次。 */
+function streamStatusText(status) {
+  if (!status) return "";
+  return String(status.message || "");
+}
+
+/**
+ * 只在后端还有会话时尽力关闭它。
+ *
+ * 失败一律忽略：切换请求、关闭面板时不该因为收尾失败弹错误；真正的泄漏由
+ * sidecar 的空闲回收兜底。
+ */
+async function closeStreamOnBackend(id) {
+  if (!id || !host.available) return;
+  try {
+    await host.invoke("grpc/stream/close", { streamId: id }, { timeoutMs: 5000 });
+  } catch {
+    // 会话可能已经结束；这里没有需要恢复的用户可见状态。
+  }
+}
+
+/**
+ * 结束本地会话状态，并让在飞的接收循环失效。
+ *
+ * keepTimeline 为 false 时连时间线一起清空：切换方法 / 服务 / 请求后就该是全新一屏，
+ * 留着上一条流的结果只会让人以为它是当前方法的输出。
+ */
+export function resetStreamSession(note = "", keepTimeline = true) {
+  streamGen += 1;
+  const previous = streamOf();
+  if (previous.id) void closeStreamOnBackend(previous.id);
+  update((s) => {
+    const timeline = !keepTimeline
+      ? []
+      : note && previous.timeline.length
+        ? [...previous.timeline, { type: "note", at: 0, text: note }]
+        : previous.timeline;
+    return { ...s, stream: { ...createStreamState(), timeline } };
+  });
+}
+
+/** 清空时间线，保留会话状态。 */
+export function clearStreamTimeline() {
+  update((s) => ({ ...s, stream: { ...s.stream, timeline: [] } }));
+}
+
+export function patchGrpcStreamOption(patch) {
+  update((s) => {
+    const stream = { ...s.grpc.stream, ...patch };
+    return {
+      ...s,
+      grpc: {
+        ...s.grpc,
+        stream: {
+          waitMs: clampNumber(stream.waitMs, STREAM_WAIT_DEFAULT, STREAM_WAIT_MIN, STREAM_WAIT_MAX),
+          idleTimeoutMs: clampNumber(stream.idleTimeoutMs, STREAM_IDLE_DEFAULT, STREAM_IDLE_MIN, STREAM_IDLE_MAX),
+          maxDurationMs: clampNumber(stream.maxDurationMs, STREAM_DURATION_DEFAULT, STREAM_DURATION_MIN, STREAM_DURATION_MAX),
+        },
+      },
+    };
+  });
+  scheduleDraftPersist();
+}
+
+/** 当前方法是否支持逐条发送（客户端流或双向流）。 */
+export function isInteractiveMethod(grpc) {
+  const info = grpc.methods.find((item) => item.name === grpc.method);
+  return Boolean(info?.clientStreaming);
+}
+
+/**
+ * 建立交互式会话。
+ *
+ * 和一元调用不同：这里不发送任何消息，只建连接和流。首条消息同样走 send，
+ * 这样「消息下标 → outSeq」的映射从第一条开始就是一致的。
+ */
+export async function connectGrpc() {
+  if (!host.available) return false;
+  let s = current();
+  if (s.stream.state === "connecting" || s.stream.busy) return false;
+
+  if (!s.grpc.methods.length && s.grpc.service) {
+    const identity = grpcIdentity(s);
+    await loadGrpcMethods({ silent: true });
+    if (grpcIdentity(current()) !== identity) return false;
+    s = current();
+  }
+
+  const base = grpcBaseParams(s);
+  if (!base.target) {
+    showToast(t("needTarget"), "warn");
+    return false;
+  }
+  if (!s.grpc.service) {
+    showToast(t("needService"), "warn");
+    return false;
+  }
+  if (!s.grpc.method) {
+    showToast(t("needMethod"), "warn");
+    return false;
+  }
+  if (base.useProtoFiles && !s.grpc.protoFiles.length) {
+    showToast(t("needProtoFiles"), "warn");
+    return false;
+  }
+
+  // 旧会话必须显式关闭，否则 sidecar 里会留着一条没人用的流。
+  if (s.stream.id) await closeStreamOnBackend(s.stream.id);
+  streamGen += 1;
+  const gen = streamGen;
+
+  const options = s.grpc.stream;
+  const startedAt = Date.now();
+  // 服务端流只有一个请求：它随建流一起发出去，之后只收不发。
+  const methodInfo = s.grpc.methods.find((item) => item.name === s.grpc.method);
+  let serverMessage;
+  if (methodInfo?.serverStreaming && !methodInfo?.clientStreaming) {
+    const raw = String(s.grpc.messages[0] ?? "").trim();
+    if (raw) {
+      try {
+        serverMessage = JSON.parse(raw);
+      } catch {
+        showToast(t("invalidJsonMessage", { index: 1 }), "error");
+        return false;
+      }
+    }
+  }
+  update((st) => ({
+    ...st,
+    stream: {
+      ...createStreamState(),
+      state: "connecting",
+      startedAt,
+      timeline: st.stream.timeline.length
+        ? [...st.stream.timeline, { type: "note", at: 0, text: t("streamNewSession") }]
+        : st.stream.timeline,
+    },
+  }));
+
+  try {
+    const data = await host.invoke(
+      "grpc/stream/open",
+      {
+        ...base,
+        service: s.grpc.service,
+        method: s.grpc.method,
+        idleTimeoutMs: options.idleTimeoutMs,
+        maxDurationMs: options.maxDurationMs,
+        ...(serverMessage !== undefined ? { message: serverMessage } : {}),
+      },
+      { timeoutMs: Math.min(118000, Math.max(20000, base.timeoutMs + 5000)) },
+    );
+    if (gen !== streamGen) return false;
+    const id = String(data?.streamId || "");
+    if (!id) throw new Error(t("streamOpenFailed"));
+    const kind = String(data?.kind || "");
+    update((st) => ({
+      ...st,
+      stream: { ...st.stream, id, kind, state: "open", error: null },
+    }));
+    showToast(kind === "server" ? t("streamReceiving") : t("streamConnected"), "ok");
+    // 双向流与服务端流都要一直收；客户端流要等半关闭之后才有响应。
+    if (kind === "bidi" || kind === "server") void receiveStreamLoop(gen, id);
+    return true;
+  } catch (error) {
+    if (gen !== streamGen) return false;
+    const message = errorMessage(error, t("streamOpenFailed"));
+    update((st) => ({
+      ...st,
+      stream: { ...st.stream, id: "", state: "error", error: message },
+    }));
+    pushTimeline([timelineEntry("error", { text: message })]);
+    showToast(message, "error");
+    return false;
+  }
+}
+
+/** 发一条消息；只写入，不等待回复。 */
+export async function sendGrpcMessage(index) {
+  const s = current();
+  const stream = s.stream;
+  if (!host.available || stream.state !== "open" || stream.busy) return false;
+
+  const text = String(s.grpc.messages[index] ?? "").trim();
+  if (!text) {
+    showToast(t("streamEmptyMessage", { index: index + 1 }), "warn");
+    return false;
+  }
+  let message;
+  try {
+    message = JSON.parse(text);
+  } catch {
+    showToast(t("invalidJsonMessage", { index: index + 1 }), "error");
+    return false;
+  }
+  if (byteLength(text) > BRIDGE_BODY_LIMIT) {
+    showToast(t("bodyTooLarge"), "error");
+    return false;
+  }
+
+  const gen = streamGen;
+  const id = stream.id;
+  patchStream({ busy: "send" });
+  try {
+    const data = await host.invoke(
+      "grpc/stream/send",
+      { streamId: id, message },
+      { timeoutMs: 30000 },
+    );
+    if (gen !== streamGen) return false;
+    const outSeq = Number(data?.outSeq) || 0;
+    update((st) => ({
+      ...st,
+      stream: {
+        ...st.stream,
+        busy: null,
+        outSeq,
+        sent: { ...st.stream.sent, [index]: outSeq },
+      },
+    }));
+    pushTimeline([timelineEntry("out", { index: index + 1, seq: outSeq, text })]);
+    return true;
+  } catch (error) {
+    if (gen !== streamGen) return false;
+    const message = errorMessage(error, t("streamSendFailed"));
+    // 发送失败通常意味着流已经不可用；把本地状态标成错误，用户需要重新连接。
+    update((st) => ({
+      ...st,
+      stream: { ...st.stream, busy: null, state: "error", error: message },
+    }));
+    pushTimeline([timelineEntry("error", { text: message })]);
+    showToast(message, "error");
+    return false;
+  }
+}
+
+/**
+ * 半关闭：我不再发了，但还在收。
+ *
+ * 客户端流靠它触发那一条总响应；双向流用它表示"说完了"，之后仍可继续收。
+ */
+export async function finishGrpcStream() {
+  const s = current();
+  const stream = s.stream;
+  if (!host.available || (stream.state !== "open" && stream.state !== "halfClosed") || stream.busy) return false;
+  if (stream.state === "halfClosed") return false;
+
+  const gen = streamGen;
+  const id = stream.id;
+  // 点了就绪：客户端已经不可能再发消息了，界面先切到"等待回复"，
+  // 不要等服务端返回才更新——那段时间正好是最需要反馈的。
+  patchStream({ busy: "finish", state: "halfClosed", waitingSince: Date.now() });
+  try {
+    const data = await host.invoke(
+      "grpc/stream/halfClose",
+      { streamId: id, waitMs: s.grpc.stream.waitMs },
+      { timeoutMs: Math.min(118000, s.grpc.stream.waitMs + 10000) },
+    );
+    if (gen !== streamGen) return false;
+    applyWaitResult(data);
+    update((st) => ({
+      ...st,
+      stream: {
+        ...st.stream,
+        busy: null,
+        state: st.stream.state === "ended" ? "ended" : "halfClosed",
+        waitingSince: st.stream.state === "ended" ? 0 : st.stream.waitingSince || Date.now(),
+      },
+    }));
+    // 还没结束说明服务端仍在处理：继续收，直到 status 或用户终止。
+    if (current().stream.state === "halfClosed") void receiveStreamLoop(gen, id);
+    return true;
+  } catch (error) {
+    if (gen !== streamGen) return false;
+    const message = errorMessage(error, t("streamFinishFailed"));
+    update((st) => ({
+      ...st,
+      stream: { ...st.stream, busy: null, state: "error", error: message, waitingSince: 0 },
+    }));
+    pushTimeline([timelineEntry("error", { text: message })]);
+    showToast(message, "error");
+    return false;
+  }
+}
+
+/** 把一次 wait / halfClose 的返回写进时间线与状态。 */
+function applyWaitResult(data) {
+  const entries = [];
+  // 同一批消息可能既出现在 halfClose 的返回里，又出现在接收循环里，按会话内的
+  // inSeq 水位去重；不能用时间线判断——时间线跨会话保留，上一条流的 seq 会误伤新会话。
+  const watermark = current().stream.inSeq;
+  const messages = Array.isArray(data?.messages) ? data.messages : [];
+  for (const message of messages) {
+    const seq = Number(message?.seq) || 0;
+    if (seq <= watermark) continue;
+    entries.push(timelineEntry("in", { seq, text: String(message?.json ?? "") }));
+  }
+  // 只记一次终态：halfClose 和接收循环都可能带回同一个 status。
+  const ending = Boolean(data?.ended) && current().stream.state !== "ended";
+  if (ending) {
+    const status = data?.status || null;
+    entries.push(timelineEntry("status", { text: streamStatusText(status), ok: (status?.code ?? 0) === 0, status }));
+  }
+  const patch = {
+    inSeq: Number(data?.inSeq) || current().stream.inSeq,
+    dropped: Number(data?.dropped) || 0,
+  };
+  if (data?.ended) {
+    patch.state = "ended";
+    patch.status = data?.status || null;
+    patch.waitingSince = 0;
+  }
+  update((s) => ({ ...s, stream: { ...s.stream, ...patch } }));
+  pushTimeline(entries);
+}
+
+/**
+ * 接收循环：单飞的 wait，超时就再挂起一次。
+ *
+ * 这不是定时轮询——没有消息时它挂在 sidecar 里等待，不空转也不丢帧；
+ * 只是每次最多等 waitMs，避免一个请求挂太久。
+ */
+async function receiveStreamLoop(gen, id) {
+  if (current().stream.receiving) return;
+  patchStream({ receiving: true });
+  try {
+    while (gen === streamGen) {
+      const stream = current().stream;
+      if (stream.id !== id) return;
+      if (stream.state !== "open" && stream.state !== "halfClosed") return;
+
+      let data;
+      try {
+        data = await host.invoke(
+          "grpc/stream/wait",
+          { streamId: id, waitMs: current().grpc.stream.waitMs },
+          { timeoutMs: Math.min(118000, current().grpc.stream.waitMs + 10000) },
+        );
+      } catch (error) {
+        if (gen !== streamGen) return;
+        const kind = describeErrorKind(error);
+        const message = errorMessage(error, t("streamWaitFailed"));
+        if (kind === "canceled") return;
+        update((s) => ({
+          ...s,
+          stream: { ...s.stream, state: "error", error: message },
+        }));
+        pushTimeline([timelineEntry("error", { text: message })]);
+        return;
+      }
+      if (gen !== streamGen) return;
+      applyWaitResult(data);
+    }
+  } finally {
+    if (gen === streamGen) patchStream({ receiving: false });
+  }
+}
+
+/** 终止会话：取消流、关连接、回收。失败不阻塞界面。 */
+export async function closeGrpcStream() {
+  const s = current();
+  const stream = s.stream;
+  if (!stream.id) return false;
+
+  streamGen += 1;
+  const id = stream.id;
+  patchStream({ busy: "close" });
+  await closeStreamOnBackend(id);
+  update((st) => ({
+    ...st,
+    stream: {
+      ...createStreamState(),
+      timeline: [...st.stream.timeline, { type: "note", at: st.stream.startedAt ? Date.now() - st.stream.startedAt : 0, text: t("streamClosed") }],
+    },
+  }));
+  return true;
+}
+
+/** 打开历史的「选项」时展示的取值；超出范围按边界收敛。 */
+export function normalizeStreamSettings(value) {
+  return {
+    waitMs: clampNumber(value?.waitMs, STREAM_WAIT_DEFAULT, STREAM_WAIT_MIN, STREAM_WAIT_MAX),
+    idleTimeoutMs: clampNumber(value?.idleTimeoutMs, STREAM_IDLE_DEFAULT, STREAM_IDLE_MIN, STREAM_IDLE_MAX),
+    maxDurationMs: clampNumber(value?.maxDurationMs, STREAM_DURATION_DEFAULT, STREAM_DURATION_MIN, STREAM_DURATION_MAX),
+  };
 }
 
 export async function copyResponse() {
