@@ -39,7 +39,6 @@ backend/
   internal/grpctool/   gRPC 反射、proto 文件编译、动态编解码与调用
   internal/rpc/        JSON-RPC 分发、方法名登记、参数解码
   sdk/                 官方 Go SDK 固定副本，非升级任务不要改
-docs/grpc-interactive-streaming.md  交互式双向流设计稿（未实现）
 scripts/              发布辅助脚本（不参与打包）
   backfill-release-sidecars.mjs  Release 缺失 .artifact.json 的补传
 assets/plugin.svg
