@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	reflectionv1 "google.golang.org/grpc/reflection/grpc_reflection_v1"
 	reflectionv1alpha "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
@@ -41,6 +42,19 @@ const (
 	maxStreamMessages    = 100
 	maxStreamBytes       = 4 * 1024 * 1024
 	maxOutboundMessages  = 100
+
+	// 长连接保活。
+	//
+	// 一条会话可能长时间没有业务消息（例如只订阅、服务端偶尔才推）。没有流量时，
+	// 链路上的 NAT、防火墙、云负载均衡会按空闲超时（常见 60s–350s）把 TCP 悄悄回收，
+	// 两端都不知道，用户看到的是"流自己结束了"。周期性 PING 让连接一直有流量，
+	// 同时能更快发现对端已经死掉。
+	//
+	// 参数保持保守：PING 太频繁会被部分服务端以 GOAWAY(too_many_pings) 拒绝。
+	// PermitWithoutStream 保持默认的 false——只在有活跃流时探活，避免空闲连接上的
+	// PING 触发服务端的最小间隔限制。
+	keepalivePingInterval = 30 * time.Second
+	keepalivePingTimeout  = 10 * time.Second
 )
 
 var metadataKeyPattern = regexp.MustCompile(`^[0-9a-z_.-]+$`)
@@ -548,6 +562,11 @@ func dialGRPC(params TargetParams) (*grpc.ClientConn, *apperr.Error) {
 			grpc.MaxCallRecvMsgSize(maxGRPCMessageBytes),
 			grpc.MaxCallSendMsgSize(maxGRPCMessageBytes),
 		),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                keepalivePingInterval,
+			Timeout:             keepalivePingTimeout,
+			PermitWithoutStream: false,
+		}),
 	}
 	if params.UseTLS {
 		options = append(options, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
