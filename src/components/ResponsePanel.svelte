@@ -23,7 +23,9 @@
    * 发出与收到按到达顺序排列，服务端的回复不挂在某条消息下面。
    */
   const timeline = $derived(Array.isArray(stream?.timeline) ? stream.timeline : []);
-  const showTimeline = $derived(protocol === "grpc" && timeline.length > 0);
+  /** 会话还在（连接中/已连接/半关闭）时即使还没有消息也要显示时间线，避免看起来像"没发起请求"。 */
+  const streamActive = $derived(["connecting", "open", "halfClosed"].includes(stream?.state));
+  const showTimeline = $derived(protocol === "grpc" && (timeline.length > 0 || streamActive));
   const streamStateLabel = $derived.by(() => {
     switch (stream?.state) {
       case "connecting":
@@ -216,6 +218,9 @@
             <span class="pill pill--warn">{t("streamDropped", { count: stream.dropped })}</span>
           {/if}
         </div>
+        {#if timeline.length === 0}
+          <p class="timeline-waiting">{t("streamWaitingPush")}</p>
+        {/if}
         {#each timeline as entry, index (index)}
           <div class="timeline-row" data-type={entry.type}>
             <span class="timeline-at">{entry.at ? `${entry.at} ms` : ""}</span>
@@ -368,6 +373,12 @@
     gap: 8px;
     padding-bottom: 6px;
     border-bottom: 1px solid var(--border);
+  }
+
+  .timeline-waiting {
+    margin: 4px 6px;
+    color: var(--muted);
+    font-size: 12px;
   }
 
   .timeline-state {
