@@ -65,23 +65,7 @@
   const streamActive = $derived(
     Boolean(stream?.id) && ["connecting", "open", "halfClosed"].includes(stream.state),
   );
-  const sentCount = $derived(Number(stream?.outSeq) || 0);
-  // 服务端流没有"已发送"的概念，显示已收到的条数更有意义。
-  const pillCount = $derived(serverOnly ? Number(stream?.inSeq) || 0 : sentCount);
   const canFinish = $derived(stream?.state === "open" && !stream?.busy && !sending);
-  const streamLabel = $derived.by(() => {
-    switch (stream?.state) {
-      case "connecting":
-        return t("connecting");
-      case "halfClosed":
-        // 客户端流半关闭后是"等那一条响应"，双向流是"继续收"，措辞要分开。
-        return stream?.kind === "client" ? t("streamWaitingReply") : t("streamHalfClosed");
-      case "open":
-        return stream?.kind === "server" ? t("streamReceiving") : t("streamOpen");
-      default:
-        return t("streamOpen");
-    }
-  });
 
   /** 服务端流点完「发送」会持续接收；一元不会，所以只有它需要这句说明。 */
   const protoFiles = $derived(Array.isArray(grpc.protoFiles) ? grpc.protoFiles : []);
@@ -353,11 +337,7 @@
     {/if}
     {#if sessionMethod}
       {#if streamActive}
-        <!-- 连接状态占用「连接」按钮的位置：不再单开一行状态条。 -->
-        <span class="stream-pill" data-tone={stream?.state === "connecting" ? "idle" : "live"}>
-          <span class="stream-dot" aria-hidden="true"></span>
-          {streamLabel}{#if pillCount > 0}<span class="stream-count">· {t("streamSentShort", { count: pillCount })}</span>{/if}
-        </span>
+        <!-- 连接状态只在右侧响应区头部显示一处，这里只留操作按钮，避免同一个"已连接"出现好几次。 -->
         {#if interactive}
           <button
             class="btn btn-secondary"
@@ -545,35 +525,6 @@
 
   .stream-stop:hover:not(:disabled) {
     color: var(--danger, #c0442f);
-  }
-
-  .stream-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 32px;
-    padding: 0 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    font-size: 12px;
-    color: var(--fg);
-    white-space: nowrap;
-  }
-
-  .stream-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--muted);
-  }
-
-  .stream-pill[data-tone="live"] .stream-dot {
-    background: var(--success, #2f9e73);
-  }
-
-  .stream-count {
-    color: var(--muted);
-    font-variant-numeric: tabular-nums;
   }
 
   .grpc-head.is-dragging {

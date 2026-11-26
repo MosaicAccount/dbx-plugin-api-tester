@@ -1604,7 +1604,7 @@ export async function connectGrpc() {
       ...st,
       stream: { ...st.stream, id, kind, state: "open", error: null },
     }));
-    showToast(kind === "server" ? t("streamReceiving") : t("streamConnected"), "ok");
+    // 连接成功不弹 toast：响应区头部已经常驻显示状态，再弹一次就是同一句话出现两遍。
     // 双向流与服务端流都要一直收；客户端流要等半关闭之后才有响应。
     if (kind === "bidi" || kind === "server") void receiveStreamLoop(gen, id);
     return true;

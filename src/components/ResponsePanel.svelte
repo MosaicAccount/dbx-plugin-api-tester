@@ -55,19 +55,50 @@
     stream?.waitingSince ? Math.max(0, Math.round((now - stream.waitingSince) / 1000)) : 0,
   );
 
-  function entryLabel(entry) {
-    switch (entry.type) {
-      case "out":
-        return `${t("sendMessage")} #${entry.seq}`;
-      case "in":
-        return `#${entry.seq}`;
-      case "status":
-        return entry.status?.name || "status";
-      case "error":
-        return t("streamError");
-      default:
-        return "";
+  /** 顶部计数：发送 / 收到。服务端流没有"已发送"的概念，只显示收到的条数。 */
+  const counts = $derived.by(() => {
+    const sent = Number(stream?.outSeq) || 0;
+    const received = Number(stream?.inSeq) || 0;
+    // 服务端流的请求在 open 时随建流发出，不存在"已发送 N 条"的概念。
+    if (stream?.kind === "server") return received ? t("streamReceivedCount", { count: received }) : "";
+    if (sent && received) return t("streamCounts", { sent, received });
+    if (sent) return t("streamSentCount", { count: sent });
+    if (received) return t("streamReceivedCount", { count: received });
+    return "";
+  });
+
+  /** 时间线正文的语法高亮缓存：条目对象引用稳定，按对象缓存即可，避免每次重渲染都重新高亮。 */
+  const bodyCache = new Map();
+  /** 超过这个长度的正文不做高亮：逐字符扫描太贵，长消息直接按纯文本展示。 */
+  const HIGHLIGHT_LIMIT = 200000;
+
+  function bodyHTML(entry) {
+    if (bodyCache.has(entry)) return bodyCache.get(entry);
+    const text = String(entry.text ?? "");
+    let html = null;
+    if (text && text.length <= HIGHLIGHT_LIMIT) {
+      try {
+        html = highlightJSON(prettyJSON(text));
+      } catch {
+        html = null;
+      }
     }
+    if (bodyCache.size > 800) bodyCache.clear();
+    bodyCache.set(entry, html);
+    return html;
+  }
+
+  /** 相对会话开始的时间：1 秒以内用毫秒，之后用秒并保留一位小数。 */
+  function formatAt(ms) {
+    const value = Number(ms) || 0;
+    if (value <= 0) return "";
+    if (value < 1000) return `${value} ms`;
+    return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)} s`;
+  }
+
+  /** 方向标签：发送用「发送」，收到用「收到」。 */
+  function entryTag(entry) {
+    return entry.type === "out" ? t("sendMessage") : t("streamReceived");
   }
 
   // 响应面板必须用"响应"语义的标签：请求面板已经占用了「请求体 / 请求头」，
@@ -208,9 +239,17 @@
     {#if showTimeline}
       <div class="timeline" role="log" aria-live="polite" aria-label={t("response")}>
         <div class="timeline-head">
+          <span class="timeline-dot" data-tone={stream?.state === "error" ? "err" : stream?.state === "ended" ? "done" : "live"} aria-hidden="true"></span>
           <span class="timeline-state" data-tone={stream?.state === "error" ? "err" : stream?.state === "ended" ? "done" : "live"}>
             {streamStateLabel}
           </span>
+          {#if stream?.kind}
+            <span class="timeline-kind">{stream.kind === "server" ? t("serverStreaming") : stream.kind === "bidi" ? t("bidiStreaming") : t("clientStreaming")}</span>
+          {/if}
+          {#if counts}
+            <span class="timeline-counts">{counts}</span>
+          {/if}
+          <span class="grow"></span>
           {#if stream?.state === "halfClosed" && waitedSeconds > 0}
             <span class="timeline-wait">{t("streamWaitedSeconds", { seconds: waitedSeconds })}</span>
           {/if}
@@ -218,20 +257,54 @@
             <span class="pill pill--warn">{t("streamDropped", { count: stream.dropped })}</span>
           {/if}
         </div>
+
         {#if timeline.length === 0}
-          <p class="timeline-waiting">{t("streamWaitingPush")}</p>
+          <!-- 连接状态已经在上面的头部行里，这里只说明"还没有消息"，不再重复"已连接"。 -->
+          <p class="timeline-empty">
+            {stream?.kind === "server" ? t("streamWaitingPush") : t("streamNoMessages")}
+          </p>
+        {:else}
+          <ol class="timeline-list">
+            {#each timeline as entry, index (index)}
+              <li class="tl-item" data-type={entry.type}>
+                {#if entry.type === "note"}
+                  <div class="tl-note">{entry.text}</div>
+                {:else if entry.type === "status"}
+                  <!-- 终态不是一条消息：不套消息卡，也不用竖条，只做时间线的收尾行。 -->
+                  <div class="tl-final" data-ok={String(Boolean(entry.ok))}>
+                    <div class="tl-final-head">
+                      <span class="tl-tag" data-type={entry.ok ? "status" : "error"}>
+                        {entry.ok ? t("streamStatusOk") : t("streamStatusFailed")}
+                      </span>
+                      <span class="tl-final-code">{entry.status?.name || "status"}</span>
+                      <span class="grow"></span>
+                      {#if entry.at}<span class="tl-time">{formatAt(entry.at)}</span>{/if}
+                    </div>
+                    <!-- 错误原因经常是一整句（transport / connection / desc=…），单独一行换行展示。 -->
+                    {#if entry.text}<p class="tl-final-msg">{entry.text}</p>{/if}
+                  </div>
+                {:else}
+                  <div class="tl-card" data-type={entry.type}>
+                    <div class="tl-head">
+                      <span class="tl-tag" data-type={entry.type}>{entryTag(entry)}</span>
+                      <span class="tl-seq">#{entry.seq}</span>
+                      <span class="grow"></span>
+                      {#if entry.at}<span class="tl-time">{formatAt(entry.at)}</span>{/if}
+                    </div>
+                    {#if entry.text}
+                      {@const html = bodyHTML(entry)}
+                      {#if html}
+                        <pre class="tl-code">{@html html}</pre>
+                      {:else}
+                        <pre class="tl-code is-plain">{entry.text}</pre>
+                      {/if}
+                    {/if}
+                  </div>
+                {/if}
+              </li>
+            {/each}
+          </ol>
         {/if}
-        {#each timeline as entry, index (index)}
-          <div class="timeline-row" data-type={entry.type}>
-            <span class="timeline-at">{entry.at ? `${entry.at} ms` : ""}</span>
-            <span class="timeline-label">{entryLabel(entry)}</span>
-            {#if entry.type === "note"}
-              <span class="timeline-note">{entry.text}</span>
-            {:else if entry.text}
-              <pre class="timeline-body">{entry.text}</pre>
-            {/if}
-          </div>
-        {/each}
       </div>
     {:else if !response}
       <div class="response-empty">
@@ -357,117 +430,270 @@
 {/snippet}
 
 <style>
+  /* 会话时间线：一条消息一张卡片，和一元响应的代码块保持同一套观感。 */
   .timeline {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 10px 12px;
-    overflow: auto;
+    gap: 10px;
     height: 100%;
-    font-size: 12px;
+    padding: 12px 14px 16px;
+    overflow: auto;
   }
 
   .timeline-head {
+    position: sticky;
+    top: -12px;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 8px;
-    padding-bottom: 6px;
+    margin: -12px -14px 0;
+    padding: 10px 14px;
+    background: var(--panel);
     border-bottom: 1px solid var(--border);
+    font-size: 11.5px;
+    color: var(--muted);
   }
 
-  .timeline-waiting {
-    margin: 4px 6px;
-    color: var(--muted);
-    font-size: 12px;
+  .timeline-dot {
+    width: 7px;
+    height: 7px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+
+  .timeline-dot[data-tone="live"] {
+    background: var(--success);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 18%, transparent);
+  }
+
+  .timeline-dot[data-tone="err"] {
+    background: var(--danger);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .timeline-dot[data-tone="live"] {
+      animation: tl-pulse 2.4s ease-in-out infinite;
+    }
+
+    @keyframes tl-pulse {
+      0%,
+      100% {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.4;
+      }
+    }
   }
 
   .timeline-state {
     font-weight: 600;
-    color: var(--muted);
-  }
-
-  .timeline-state[data-tone="live"] {
-    color: var(--accent, #2f9e73);
-  }
-
-  .timeline-wait {
-    color: var(--muted);
-    font-variant-numeric: tabular-nums;
-    font-size: 11px;
+    color: var(--fg);
   }
 
   .timeline-state[data-tone="err"] {
-    color: var(--danger, #c0442f);
+    color: var(--danger);
   }
 
-  .timeline-row {
-    display: grid;
-    grid-template-columns: 62px 92px minmax(0, 1fr);
-    gap: 8px;
-    align-items: start;
-    padding: 4px 6px;
-    border-left: 2px solid transparent;
-    background: var(--surface-2, transparent);
-    border-radius: 3px;
-  }
-
-  .timeline-row[data-type="out"] {
-    border-left-color: var(--primary, #3b6fd4);
-  }
-
-  .timeline-row[data-type="in"] {
-    border-left-color: var(--accent, #2f9e73);
-  }
-
-  .timeline-row[data-type="status"] {
-    border-left-color: var(--muted);
-  }
-
-  .timeline-row[data-type="error"] {
-    border-left-color: var(--danger, #c0442f);
-  }
-
-  .timeline-row[data-type="note"] {
-    border-left-color: var(--border);
-    opacity: 0.75;
-  }
-
-  .timeline-at {
+  .timeline-kind {
+    padding: 1px 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 10.5px;
     color: var(--muted);
+  }
+
+  .timeline-counts {
     font-variant-numeric: tabular-nums;
-    font-size: 11px;
   }
 
-  .timeline-label {
-    font-weight: 500;
-    white-space: nowrap;
+  .timeline-wait {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .timeline-empty {
+    margin: 0;
+    padding: 14px 4px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .timeline-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .tl-item {
+    margin: 0;
+  }
+
+  /* 方向靠左侧细条 + 标签色区分，扫视时不用读文字。 */
+  .tl-card {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 3%, var(--panel));
     overflow: hidden;
-    text-overflow: ellipsis;
   }
 
-  .timeline-note {
+  .tl-card[data-type="out"] {
+    border-left-color: var(--primary);
+  }
+
+  .tl-card[data-type="in"] {
+    border-left-color: var(--success);
+  }
+
+  .tl-card[data-type="error"] {
+    border-left-color: var(--danger);
+  }
+
+  .tl-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    font-size: 11px;
     color: var(--muted);
   }
 
-  .timeline-body {
-    margin: 0;
+  /* 标签/序号/耗时都是单行短内容：禁止被长正文挤窄，否则中文标签会竖排成「状/态」。 */
+  .tl-tag {
+    flex: none;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+  }
+
+  .tl-tag[data-type="in"] {
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+  }
+
+  .tl-tag[data-type="status"] {
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+  }
+
+  .tl-tag[data-type="error"] {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+  }
+
+  .tl-seq {
+    flex: none;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg);
+  }
+
+  .tl-time {
+    flex: none;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 终态收尾行：成功只是一行灰字，失败才给整块底色，视觉上和"消息"区分开。 */
+  .tl-final {
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 2%, var(--panel));
+  }
+
+  .tl-final[data-ok="false"] {
+    border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+    border-left: 3px solid var(--danger);
+    padding-left: 8px;
+    background: color-mix(in srgb, var(--danger) 6%, var(--panel));
+  }
+
+  .tl-final-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .tl-final-code {
+    flex: none;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--success);
+  }
+
+  .tl-final[data-ok="false"] .tl-final-code {
+    color: var(--danger);
+  }
+
+  /* 错误原因经常是一整句（transport / desc=…）：独占一行、可换行、超高时内部滚动。 */
+  .tl-final-msg {
+    margin: 6px 0 0;
+    max-height: 180px;
+    overflow: auto;
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 11.2px;
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
   }
 
+  .tl-code {
+    margin: 0;
+    padding: 10px 12px;
+    overflow: auto;
+    max-height: 320px;
+    font-family: var(--font-mono);
+    font-size: 11.8px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .tl-code.is-plain {
+    color: var(--fg);
+  }
+
+  .tl-note {
+    padding: 2px 0;
+    color: var(--muted);
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    text-align: center;
+    text-transform: uppercase;
+  }
+
   @media (max-width: 620px) {
-    .timeline-row {
-      grid-template-columns: 52px minmax(0, 1fr);
+    .timeline {
+      padding: 10px 10px 14px;
     }
 
-    .timeline-body {
-      grid-column: 1 / -1;
-      padding-left: 0;
+    .timeline-head {
+      margin: -10px -10px 0;
+      padding: 8px 10px;
+    }
+
+    .timeline-kind {
+      display: none;
     }
   }
+
   .grow {
     flex: 1;
   }
