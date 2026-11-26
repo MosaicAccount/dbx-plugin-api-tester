@@ -179,7 +179,7 @@ npm run build          # 输出到 ui/，成功时打印 DBX_UI_BUILD_SUCCESS
 dbx-plugin package .
 ```
 
-本地产物是当前平台（本机为 `darwin-arm64`）的未签名候选包 `dist/com.jlian.apitester-0.1.1-SNAPSHOT-darwin-arm64.dbxp` 及其 `.artifact.json`。
+本地产物是当前平台（本机为 `darwin-arm64`）的未签名候选包 `dist/com.jlian.apitester-0.1.1-darwin-arm64.dbxp` 及其 `.artifact.json`。
 
 ### 多平台打包
 
