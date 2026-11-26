@@ -480,6 +480,18 @@ function closeStreamForParamChange(patch) {
   resetStreamSession(t("streamParamsChanged"));
 }
 
+/**
+ * 描述符来源变了（服务 / 方法 / proto 文件）后回收旧会话。
+ *
+ * 这几种变化都会让当前会话「对不上」界面：它绑的是旧方法的 descriptor，继续留着只会在
+ * sidecar 里占一条连接，直到空闲超时被回收。没有会话时什么都不做，避免凭空清掉时间线。
+ */
+function resetStreamForSchemaChange() {
+  const stream = current().stream;
+  if (!stream.id && stream.state !== "connecting") return;
+  resetStreamSession("", false);
+}
+
 export function patchGrpc(patch) {
   closeStreamForParamChange(patch);
   update((s) => ({ ...s, grpc: { ...s.grpc, ...patch } }));
@@ -525,13 +537,11 @@ export function setResponseTab(tab) {
 }
 
 export function setGrpcMethods(methods) {
-  update((s) => {
-    const stillValid = methods.some((method) => method.name === s.grpc.method);
-    return {
-      ...s,
-      grpc: { ...s.grpc, methods, method: stillValid ? s.grpc.method : methods[0]?.name || "" },
-    };
-  });
+  const previous = current().grpc.method;
+  // 旧方法不在新列表里时会被顶成第一个：这是隐式换方法，同样得回收旧会话。
+  const next = methods.some((method) => method.name === previous) ? previous : methods[0]?.name || "";
+  if (next !== previous) resetStreamForSchemaChange();
+  update((s) => ({ ...s, grpc: { ...s.grpc, methods, method: next } }));
 }
 
 export function setGrpcService(service) {
@@ -627,19 +637,19 @@ export function addGrpcProtoFiles(entries) {
   }
 
   if (accepted.length) {
-    update((s) => {
-      const switching = s.grpc.schemaMode !== "file";
-      return {
-        ...s,
-        grpc: {
-          ...s.grpc,
-          schemaMode: "file",
-          protoFiles: [...existing.values()],
-          // 从反射切过来时旧服务的描述符来源不同，先清掉；文件模式的再次导入则保留选择。
-          ...(switching ? { services: [], service: "", methods: [], method: "" } : {}),
-        },
-      };
-    });
+    const switching = current().grpc.schemaMode !== "file";
+    // 从反射切到文件模式会把 service / method 清掉，旧会话的描述符来源已经不同。
+    if (switching) resetStreamForSchemaChange();
+    update((s) => ({
+      ...s,
+      grpc: {
+        ...s.grpc,
+        schemaMode: "file",
+        protoFiles: [...existing.values()],
+        // 从反射切过来时旧服务的描述符来源不同，先清掉；文件模式的再次导入则保留选择。
+        ...(switching ? { services: [], service: "", methods: [], method: "" } : {}),
+      },
+    }));
     scheduleDraftPersist();
   }
   return { added: accepted.length, rejected };
@@ -647,6 +657,8 @@ export function addGrpcProtoFiles(entries) {
 
 export function removeGrpcProtoFile(name) {
   const target = String(name || "");
+  // 服务 / 方法会被清空，旧会话绑的是被删文件编译出来的 descriptor，必须一起回收。
+  resetStreamForSchemaChange();
   update((s) => ({
     ...s,
     grpc: {
@@ -1219,20 +1231,21 @@ export async function discoverGrpc() {
       { timeoutMs: Math.min(118000, base.timeoutMs + 5000) },
     );
     const services = Array.isArray(data?.services) ? data.services : [];
-    update((st) => {
-      const service = services.includes(st.grpc.service) ? st.grpc.service : services[0] || "";
-      return {
-        ...st,
-        grpc: {
-          ...st.grpc,
-          services,
-          service,
-          // 同一个服务刷新时保留已选方法，避免每次重新发现都把用户的选择重置成第一个。
-          method: service === st.grpc.service ? st.grpc.method : "",
-          methods: [],
-        },
-      };
-    });
+    // 发现结果里没有当前服务时会顺移到一个新服务并清空方法：这是隐式换 schema。
+    const previousService = current().grpc.service;
+    const nextService = services.includes(previousService) ? previousService : services[0] || "";
+    if (nextService !== previousService) resetStreamForSchemaChange();
+    update((st) => ({
+      ...st,
+      grpc: {
+        ...st.grpc,
+        services,
+        service: nextService,
+        // 同一个服务刷新时保留已选方法，避免每次重新发现都把用户的选择重置成第一个。
+        method: nextService === previousService ? st.grpc.method : "",
+        methods: [],
+      },
+    }));
 
     // 方法列表是第二步 RPC；复用同一个 requestId，终止按钮在这两步之间也能命中。
     if (services.length) await loadGrpcMethods({ requestId: run.id, propagateCancel: true });
@@ -1578,7 +1591,12 @@ export async function connectGrpc() {
       },
       { timeoutMs: Math.min(118000, Math.max(20000, base.timeoutMs + 5000)) },
     );
-    if (gen !== streamGen) return false;
+    if (gen !== streamGen) {
+      // 建流本身已经成功，只是这期间用户切走了（换方法 / 目标 / 请求）。
+      // 这条流已经没有人认领，必须自己关掉，否则 sidecar 里会一直留到空闲超时。
+      void closeStreamOnBackend(String(data?.streamId || ""));
+      return false;
+    }
     const id = String(data?.streamId || "");
     if (!id) throw new Error(t("streamOpenFailed"));
     const kind = String(data?.kind || "");
