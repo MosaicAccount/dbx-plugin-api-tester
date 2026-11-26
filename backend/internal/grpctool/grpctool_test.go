@@ -1,11 +1,14 @@
 package grpctool
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jlian/dbx-plugin-api-tester/internal/apperr"
 	"github.com/jlian/dbx-plugin-api-tester/internal/values"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -31,9 +34,47 @@ func startHealthServer(t *testing.T) string {
 	return listener.Addr().String()
 }
 
+// slowWatchServer 每 40ms 推一条健康状态，用来验证取消时能保住已收到的消息。
+type slowWatchServer struct {
+	healthpb.UnimplementedHealthServer
+}
+
+func (s *slowWatchServer) Watch(
+	_ *healthpb.HealthCheckRequest,
+	stream grpc.ServerStreamingServer[healthpb.HealthCheckResponse],
+) error {
+	for index := 0; index < 1000; index++ {
+		if err := stream.Send(&healthpb.HealthCheckResponse{Status: healthpb.HealthCheckResponse_SERVING}); err != nil {
+			return err
+		}
+		select {
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case <-time.After(40 * time.Millisecond):
+		}
+	}
+	return nil
+}
+
+func startSlowWatchServer(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("cannot listen: %v", err)
+	}
+	server := grpc.NewServer()
+	healthpb.RegisterHealthServer(server, &slowWatchServer{})
+	reflection.Register(server)
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	t.Cleanup(server.Stop)
+	return listener.Addr().String()
+}
+
 func TestDiscoverGRPCServices(t *testing.T) {
 	target := startHealthServer(t)
-	result, pluginError := Discover(DiscoveryParams{TargetParams{Target: target, TimeoutMs: 5000}})
+	result, pluginError := Discover(context.Background(), DiscoveryParams{TargetParams{Target: target, TimeoutMs: 5000}})
 	if pluginError != nil {
 		t.Fatalf("unexpected error: %v", pluginError)
 	}
@@ -50,7 +91,7 @@ func TestDiscoverGRPCServices(t *testing.T) {
 
 func TestDescribeGRPCMethods(t *testing.T) {
 	target := startHealthServer(t)
-	result, pluginError := DescribeMethods(MethodsParams{
+	result, pluginError := DescribeMethods(context.Background(), MethodsParams{
 		TargetParams: TargetParams{Target: target, TimeoutMs: 5000},
 		Service:      healthService,
 	})
@@ -73,7 +114,7 @@ func TestDescribeGRPCMethods(t *testing.T) {
 
 func TestInvokeGRPCUnary(t *testing.T) {
 	target := startHealthServer(t)
-	result, pluginError := Invoke(InvokeParams{
+	result, pluginError := Invoke(context.Background(), InvokeParams{
 		TargetParams: TargetParams{Target: target, TimeoutMs: 5000},
 		Service:      healthService,
 		Method:       "Check",
@@ -97,7 +138,7 @@ func TestInvokeGRPCUnary(t *testing.T) {
 
 func TestInvokeGRPCServerStream(t *testing.T) {
 	target := startHealthServer(t)
-	result, pluginError := Invoke(InvokeParams{
+	result, pluginError := Invoke(context.Background(), InvokeParams{
 		TargetParams: TargetParams{Target: target, TimeoutMs: 1200},
 		Service:      healthService,
 		Method:       "Watch",
@@ -110,6 +151,9 @@ func TestInvokeGRPCServerStream(t *testing.T) {
 	if !invocation.Streaming {
 		t.Fatalf("expected a streaming invocation: %+v", invocation)
 	}
+	if invocation.StreamKind != "server" {
+		t.Fatalf("expected a server stream, got %q", invocation.StreamKind)
+	}
 	if len(invocation.Messages) == 0 {
 		t.Fatalf("expected at least one streamed message: %+v", invocation)
 	}
@@ -118,6 +162,58 @@ func TestInvokeGRPCServerStream(t *testing.T) {
 	}
 	if invocation.Status.Name != "DeadlineExceeded" {
 		t.Fatalf("expected the stream to end with the deadline, got %+v", invocation.Status)
+	}
+}
+
+// 长连接流被用户终止时，结果要标记 canceled，而不是丢掉已经收到的消息：
+// 前端要能显示"已终止"，也要能继续展示终止前收到的响应。
+func TestInvokeGRPCCanceledByUser(t *testing.T) {
+	target := startHealthServer(t)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	time.AfterFunc(100*time.Millisecond, func() { cancel(apperr.ErrCanceled) })
+
+	value, pluginError := Invoke(ctx, InvokeParams{
+		TargetParams: TargetParams{Target: target, TimeoutMs: 5000},
+		Service:      healthService,
+		Method:       "Watch",
+		Message:      json.RawMessage(`{"service":""}`),
+	})
+	if pluginError != nil {
+		t.Fatalf("unexpected error: %v", pluginError)
+	}
+	invocation, ok := value.(*InvokeResult)
+	if !ok {
+		t.Fatalf("unexpected result type %T", value)
+	}
+	if !invocation.Canceled {
+		t.Fatalf("expected canceled result, got %+v", invocation)
+	}
+	if invocation.OK {
+		t.Fatalf("a canceled invocation must not be OK: %+v", invocation)
+	}
+}
+
+// 服务端每 40ms 推一条；取消后必须把终止前收到的消息带回来。
+func TestInvokeGRPCCanceledKeepsPartialMessages(t *testing.T) {
+	target := startSlowWatchServer(t)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	time.AfterFunc(250*time.Millisecond, func() { cancel(apperr.ErrCanceled) })
+
+	value, pluginError := Invoke(ctx, InvokeParams{
+		TargetParams: TargetParams{Target: target, TimeoutMs: 5000},
+		Service:      healthService,
+		Method:       "Watch",
+		Message:      json.RawMessage(`{"service":""}`),
+	})
+	if pluginError != nil {
+		t.Fatalf("unexpected error: %v", pluginError)
+	}
+	invocation := value.(*InvokeResult)
+	if !invocation.Canceled {
+		t.Fatalf("expected canceled result, got %+v", invocation)
+	}
+	if len(invocation.Messages) == 0 {
+		t.Fatal("expected the messages received before cancellation to be kept")
 	}
 }
 
@@ -131,7 +227,7 @@ func TestInvokeGRPCValidation(t *testing.T) {
 		{TargetParams: TargetParams{Target: "localhost", TimeoutMs: 3000}, Service: healthService, Method: "Check"},
 	}
 	for index, params := range cases {
-		if _, pluginError := Invoke(params); pluginError == nil {
+		if _, pluginError := Invoke(context.Background(), params); pluginError == nil {
 			t.Fatalf("case %d should be rejected", index)
 		}
 	}

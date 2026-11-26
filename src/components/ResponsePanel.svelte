@@ -7,11 +7,15 @@
    */
   import { highlightJSON, presentBody, prettyJSON } from "../lib/format.js";
   import { ERROR_HINT_KEYS, formatBytes, statusTone } from "../lib/model.js";
-  import { copyResponse, setResponseTab } from "../lib/store.js";
+  import { cancelCurrentRequest, copyResponse, setResponseTab } from "../lib/store.js";
 
-  let { t, response = null, responseTab = "body" } = $props();
+  let { t, response = null, responseTab = "body", protocol = "http", canceling = false } = $props();
 
-  const headersTabLabel = $derived(response?.protocol === "grpc" ? t("metadata") : t("headers"));
+  // 响应面板必须用"响应"语义的标签：请求面板已经占用了「请求体 / 请求头」，
+  // 这里沿用同一组文案会让人以为看到的是刚刚填的请求。
+  // 还没有响应时用当前请求协议判断，gRPC 下也能显示「响应元数据」。
+  const activeProtocol = $derived(response?.protocol || protocol);
+  const headersTabLabel = $derived(activeProtocol === "grpc" ? t("responseMetadata") : t("responseHeadersTab"));
 
   const hint = $derived.by(() => {
     if (response?.kind !== "error") return "";
@@ -47,8 +51,20 @@
     const data = response?.data;
     if (response?.protocol !== "grpc" || !data) return [];
     const status = data.status || { name: data.ok ? "OK" : "ERROR", code: data.ok ? 0 : -1 };
-    const badges = [{ text: status.name || "OK", tone: data.ok ? "ok" : "err" }];
-    if (data.streaming) badges.push({ text: t("serverStreaming"), tone: "info" });
+    // 主动终止时状态码一定是 Canceled，用中性的「已终止」比红色的 Canceled 更准确。
+    const badges = [
+      data.canceled ? { text: t("canceledBadge"), tone: "warn" } : { text: status.name || "OK", tone: data.ok ? "ok" : "err" },
+    ];
+    if (data.streaming) {
+      // 旧响应没有 streamKind，按服务端流显示，避免回看历史时徽标消失。
+      const label =
+        data.streamKind === "client"
+          ? t("clientStreaming")
+          : data.streamKind === "bidi"
+            ? t("bidiStreaming")
+            : t("serverStreaming");
+      badges.push({ text: label, tone: "info" });
+    }
     if (data.truncated) badges.push({ text: t("truncatedBadge"), tone: "warn" });
     return badges;
   });
@@ -58,7 +74,9 @@
     if (response?.protocol !== "grpc" || !data) return [];
     const items = [];
     const status = data.status || {};
-    if (Number.isFinite(status.code) && status.code !== 0) items.push(t("codeLabel", { code: status.code }));
+    if (!data.canceled && Number.isFinite(status.code) && status.code !== 0) {
+      items.push(t("codeLabel", { code: status.code }));
+    }
     if (Number.isFinite(data.elapsedMs)) items.push(`${data.elapsedMs} ms`);
     if (Number.isFinite(data.sizeBytes)) items.push(formatBytes(data.sizeBytes));
     return items;
@@ -69,7 +87,7 @@
   /** gRPC 调用失败但拿到了 status 时，同样给一条排错提示。 */
   const grpcHint = $derived.by(() => {
     const data = response?.data;
-    if (response?.protocol !== "grpc" || data?.ok) return "";
+    if (response?.protocol !== "grpc" || data?.ok || data?.canceled) return "";
     const key = ERROR_HINT_KEYS[data?.errorKind || response?.errorKind];
     return key ? t(key) : "";
   });
@@ -82,7 +100,11 @@
       {#if response?.kind === "loading"}
         <span class="pill pill--info">{t("loading")}</span>
       {:else if response?.kind === "error"}
-        <span class="pill pill--err">{t("requestFailed")}</span>
+        {#if response.errorKind === "canceled"}
+          <span class="pill pill--warn">{t("canceledBadge")}</span>
+        {:else}
+          <span class="pill pill--err">{t("requestFailed")}</span>
+        {/if}
         {#if Number.isFinite(response.elapsedMs)}<span class="meta">{response.elapsedMs} ms</span>{/if}
       {:else if response?.protocol === "http"}
         {#each httpBadges as badge (badge.text)}
@@ -102,7 +124,7 @@
 
   <div class="tabs tabs--response">
     <button class="tab" class:is-active={responseTab === "body"} type="button" onclick={() => setResponseTab("body")}>
-      {t("body")}
+      {t("responseBody")}
     </button>
     <button class="tab" class:is-active={responseTab === "headers"} type="button" onclick={() => setResponseTab("headers")}>
       {headersTabLabel}
@@ -118,12 +140,26 @@
     {:else if response.kind === "loading"}
       <div class="response-loading">
         <span class="spinner"></span>
-        <span>{t("loading")}</span>
+        <span>{canceling ? t("stopping") : t("loading")}</span>
+        <span class="grow"></span>
+        <!-- 响应迟迟不回来时，用户不必回到顶部找终止按钮。 -->
+        <button
+          class="btn btn-secondary btn-sm"
+          type="button"
+          disabled={canceling}
+          onclick={() => void cancelCurrentRequest()}
+        >
+          {canceling ? t("stopping") : t("stop")}
+        </button>
       </div>
     {:else if response.kind === "error"}
       <div class="response-error">
-        <div class="response-error-title">{t("requestFailed")}</div>
-        <pre class="response-error-code">{response.error}</pre>
+        <div class="response-error-title">
+          {response.errorKind === "canceled" ? t("requestCanceled") : t("requestFailed")}
+        </div>
+        {#if response.errorKind !== "canceled"}
+          <pre class="response-error-code">{response.error}</pre>
+        {/if}
         {#if hint}<div class="hint">{hint}</div>{/if}
       </div>
     {:else if response.protocol === "http"}
@@ -188,7 +224,10 @@
     {@render headerTable(data.trailers)}
   {:else}
     {@const status = data.status || { name: data.ok ? "OK" : "ERROR", code: data.ok ? 0 : -1 }}
-    {#if !data.ok && status.message}
+    {#if data.canceled}
+      <!-- 被终止的调用仍然保留已经收到的消息，下面继续渲染。 -->
+      <p class="response-note">{t("hintCanceled")}</p>
+    {:else if !data.ok && status.message}
       <div class="response-error">
         <div class="response-error-title">
           {status.name || t("requestFailed")}{Number.isFinite(status.code) ? ` (${status.code})` : ""}

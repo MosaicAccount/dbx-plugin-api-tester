@@ -40,6 +40,7 @@ const (
 	maxReflectionFiles   = 256
 	maxStreamMessages    = 100
 	maxStreamBytes       = 4 * 1024 * 1024
+	maxOutboundMessages  = 100
 )
 
 var metadataKeyPattern = regexp.MustCompile(`^[0-9a-z_.-]+$`)
@@ -50,6 +51,9 @@ type TargetParams struct {
 	SkipTLSVerify bool              `json:"skipTlsVerify"`
 	TimeoutMs     int               `json:"timeoutMs"`
 	Metadata      []common.KeyValue `json:"metadata"`
+	// UseProtoFiles 为 true 时用导入的 .proto 文件代替 Server Reflection 解析方法。
+	UseProtoFiles bool        `json:"useProtoFiles"`
+	ProtoFiles    []ProtoFile `json:"protoFiles"`
 }
 
 type DiscoveryParams struct {
@@ -63,9 +67,12 @@ type MethodsParams struct {
 
 type InvokeParams struct {
 	TargetParams
-	Service string          `json:"service"`
-	Method  string          `json:"method"`
+	Service string `json:"service"`
+	Method  string `json:"method"`
+	// Message 是一元与服务端流唯一的请求消息。
 	Message json.RawMessage `json:"message"`
+	// Messages 是客户端流与双向流的出站消息序列；非空时优先于 Message。
+	Messages []json.RawMessage `json:"messages"`
 }
 
 type ServicesResult struct {
@@ -96,36 +103,61 @@ type StatusInfo struct {
 }
 
 type InvokeResult struct {
-	OK          bool              `json:"ok"`
-	Method      string            `json:"method"`
-	Status      StatusInfo        `json:"status"`
-	MessageJSON string            `json:"messageJson,omitempty"`
-	Messages    []string          `json:"messages,omitempty"`
-	Streaming   bool              `json:"streaming,omitempty"`
-	Truncated   bool              `json:"truncated,omitempty"`
-	Metadata    []common.KeyValue `json:"metadata"`
-	Trailers    []common.KeyValue `json:"trailers"`
-	ElapsedMs   int64             `json:"elapsedMs"`
-	SizeBytes   int               `json:"sizeBytes"`
+	OK          bool       `json:"ok"`
+	Method      string     `json:"method"`
+	Status      StatusInfo `json:"status"`
+	MessageJSON string     `json:"messageJson,omitempty"`
+	Messages    []string   `json:"messages,omitempty"`
+	Streaming   bool       `json:"streaming,omitempty"`
+	// StreamKind 取 client / server / bidi，让界面能显示准确的流类型。
+	StreamKind string `json:"streamKind,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
+	// Canceled 表示这次调用是用户主动终止的。为 true 时 Messages 里保留
+	// 终止前已经收到的响应，界面可以展示"终止前收到了什么"。
+	Canceled  bool              `json:"canceled,omitempty"`
+	Metadata  []common.KeyValue `json:"metadata"`
+	Trailers  []common.KeyValue `json:"trailers"`
+	ElapsedMs int64             `json:"elapsedMs"`
+	SizeBytes int               `json:"sizeBytes"`
 }
 
 // Discover 列出目标服务端可用的 gRPC 服务。
-func Discover(params DiscoveryParams) (any, *apperr.Error) {
+//
+// 导入了 proto 文件时直接从本地描述符里列服务，不再要求服务端开启 Reflection。
+func Discover(ctx context.Context, params DiscoveryParams) (any, *apperr.Error) {
+	started := time.Now()
+	if pluginError := canceledByUser(ctx); pluginError != nil {
+		return nil, pluginError
+	}
+	if params.UseProtoFiles {
+		schema, pluginError := loadProtoSchema(params.ProtoFiles)
+		if pluginError != nil {
+			return nil, pluginError
+		}
+		return &ServicesResult{
+			Target:    params.Target,
+			Services:  schema.serviceNames(),
+			ElapsedMs: time.Since(started).Milliseconds(),
+		}, nil
+	}
+
 	connection, pluginError := dialGRPC(params.TargetParams)
 	if pluginError != nil {
 		return nil, pluginError
 	}
 	defer connection.Close()
 
-	ctx, cancel, pluginError := grpcContext(params.TimeoutMs, params.Metadata)
+	ctx, cancel, pluginError := grpcContext(ctx, params.TimeoutMs, params.Metadata)
 	if pluginError != nil {
 		return nil, pluginError
 	}
 	defer cancel()
 
-	started := time.Now()
 	services, err := listServices(ctx, connection)
 	if err != nil {
+		if pluginError := canceledByUser(ctx); pluginError != nil {
+			return nil, pluginError
+		}
 		return nil, grpcReflectionError(err)
 	}
 	visible := make([]string, 0, len(services))
@@ -143,10 +175,30 @@ func Discover(params DiscoveryParams) (any, *apperr.Error) {
 }
 
 // DescribeMethods 列出某个服务的全部方法签名。
-func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
+func DescribeMethods(ctx context.Context, params MethodsParams) (any, *apperr.Error) {
 	serviceName := strings.TrimSpace(params.Service)
 	if serviceName == "" {
 		return nil, apperr.Invalid("Service name is required")
+	}
+
+	started := time.Now()
+	if pluginError := canceledByUser(ctx); pluginError != nil {
+		return nil, pluginError
+	}
+	if params.UseProtoFiles {
+		schema, pluginError := loadProtoSchema(params.ProtoFiles)
+		if pluginError != nil {
+			return nil, pluginError
+		}
+		methods, err := schema.methodInfos(serviceName)
+		if err != nil {
+			return nil, apperr.Invalid(err.Error())
+		}
+		return &MethodsResult{
+			Service:   serviceName,
+			Methods:   methods,
+			ElapsedMs: time.Since(started).Milliseconds(),
+		}, nil
 	}
 
 	connection, pluginError := dialGRPC(params.TargetParams)
@@ -155,15 +207,17 @@ func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 	}
 	defer connection.Close()
 
-	ctx, cancel, pluginError := grpcContext(params.TimeoutMs, params.Metadata)
+	ctx, cancel, pluginError := grpcContext(ctx, params.TimeoutMs, params.Metadata)
 	if pluginError != nil {
 		return nil, pluginError
 	}
 	defer cancel()
 
-	started := time.Now()
 	registry, err := loadFileRegistry(ctx, connection, serviceName)
 	if err != nil {
+		if pluginError := canceledByUser(ctx); pluginError != nil {
+			return nil, pluginError
+		}
 		return nil, grpcReflectionError(err)
 	}
 	descriptor, err := registry.FindDescriptorByName(protoreflect.FullName(serviceName))
@@ -176,15 +230,7 @@ func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 	}
 	methods := make([]MethodInfo, 0, service.Methods().Len())
 	for index := 0; index < service.Methods().Len(); index++ {
-		method := service.Methods().Get(index)
-		methods = append(methods, MethodInfo{
-			Name:            string(method.Name()),
-			FullName:        fmt.Sprintf("/%s/%s", service.FullName(), method.Name()),
-			InputType:       string(method.Input().FullName()),
-			OutputType:      string(method.Output().FullName()),
-			ClientStreaming: method.IsStreamingClient(),
-			ServerStreaming: method.IsStreamingServer(),
-		})
+		methods = append(methods, methodInfoOf(service, service.Methods().Get(index)))
 	}
 	return &MethodsResult{
 		Service:   serviceName,
@@ -193,8 +239,11 @@ func DescribeMethods(params MethodsParams) (any, *apperr.Error) {
 	}, nil
 }
 
-// Invoke 调用一个 gRPC 方法（支持一元与服务端流）。
-func Invoke(params InvokeParams) (any, *apperr.Error) {
+// Invoke 调用一个 gRPC 方法（一元、服务端流、客户端流与双向流）。
+func Invoke(ctx context.Context, params InvokeParams) (any, *apperr.Error) {
+	if pluginError := canceledByUser(ctx); pluginError != nil {
+		return nil, pluginError
+	}
 	serviceName := strings.TrimSpace(params.Service)
 	methodName := strings.TrimSpace(params.Method)
 	if methodName == "" {
@@ -210,45 +259,114 @@ func Invoke(params InvokeParams) (any, *apperr.Error) {
 		methodName = full[index+1:]
 	}
 
+	// 先编译本地 proto：语法问题应该在发起连接之前就返回。
+	var schema *protoSchema
+	if params.UseProtoFiles {
+		loaded, pluginError := loadProtoSchema(params.ProtoFiles)
+		if pluginError != nil {
+			return nil, pluginError
+		}
+		schema = loaded
+	}
+
 	connection, pluginError := dialGRPC(params.TargetParams)
 	if pluginError != nil {
 		return nil, pluginError
 	}
 	defer connection.Close()
 
-	ctx, cancel, pluginError := grpcContext(params.TimeoutMs, params.Metadata)
+	ctx, cancel, pluginError := grpcContext(ctx, params.TimeoutMs, params.Metadata)
 	if pluginError != nil {
 		return nil, pluginError
 	}
 	defer cancel()
 
-	registry, err := loadFileRegistry(ctx, connection, serviceName)
-	if err != nil {
-		return nil, grpcReflectionError(err)
-	}
-	method, err := findMethod(registry, serviceName, methodName)
-	if err != nil {
-		return nil, apperr.Invalid(err.Error())
-	}
-	if method.IsStreamingClient() {
-		return nil, apperr.Invalid("Client-streaming and bidirectional gRPC methods are not supported yet")
+	var method protoreflect.MethodDescriptor
+	if schema != nil {
+		found, err := schema.findMethod(serviceName, methodName)
+		if err != nil {
+			return nil, apperr.Invalid(err.Error())
+		}
+		method = found
+	} else {
+		registry, err := loadFileRegistry(ctx, connection, serviceName)
+		if err != nil {
+			if pluginError := canceledByUser(ctx); pluginError != nil {
+				return nil, pluginError
+			}
+			return nil, grpcReflectionError(err)
+		}
+		found, err := findMethod(registry, serviceName, methodName)
+		if err != nil {
+			return nil, apperr.Invalid(err.Error())
+		}
+		method = found
 	}
 
-	requestMessage := dynamicpb.NewMessage(method.Input())
-	messageBytes := params.Message
-	if len(strings.TrimSpace(string(messageBytes))) == 0 {
-		messageBytes = []byte("{}")
+	payloads := outboundPayloads(params)
+	if len(payloads) > maxOutboundMessages {
+		return nil, apperr.Invalid(fmt.Sprintf("Too many request messages (limit %d)", maxOutboundMessages))
 	}
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(messageBytes, requestMessage); err != nil {
-		return nil, apperr.Invalid(fmt.Sprintf("Request message does not match %s: %v", method.Input().FullName(), err))
+	// 一元与服务端流在协议上只能带一条请求消息，多给出来的是调用方的错误，
+	// 与其静默丢弃，不如在边界上直接拒绝。
+	if !method.IsStreamingClient() && len(payloads) != 1 {
+		return nil, apperr.Invalid("This method accepts exactly one request message")
+	}
+
+	outbound := make([]proto.Message, 0, len(payloads))
+	for index, payload := range payloads {
+		requestMessage := dynamicpb.NewMessage(method.Input())
+		if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(payload, requestMessage); err != nil {
+			if len(payloads) == 1 {
+				return nil, apperr.Invalid(fmt.Sprintf("Request message does not match %s: %v", method.Input().FullName(), err))
+			}
+			return nil, apperr.Invalid(fmt.Sprintf("Request message #%d does not match %s: %v", index+1, method.Input().FullName(), err))
+		}
+		outbound = append(outbound, requestMessage)
 	}
 
 	fullMethod := fmt.Sprintf("/%s/%s", method.Parent().FullName(), method.Name())
 	started := time.Now()
-	if method.IsStreamingServer() {
-		return invokeServerStream(ctx, connection, method, fullMethod, requestMessage, started)
+	if method.IsStreamingServer() || method.IsStreamingClient() {
+		result, pluginError := invokeStream(ctx, connection, method, fullMethod, outbound, started)
+		return markCanceled(ctx, result, pluginError)
 	}
-	return invokeUnary(ctx, connection, method, fullMethod, requestMessage, started)
+	result, pluginError := invokeUnary(ctx, connection, method, fullMethod, outbound[0], started)
+	return markCanceled(ctx, result, pluginError)
+}
+
+// markCanceled 把"用户点了终止"标到结果上，而不是丢掉已经收到的消息。
+//
+// 远端对我们取消的反应通常只是 Canceled 状态；这里以调用方写入的 cause 为准，
+// 这样前端既能显示"已终止"，也能继续看到终止前收到的响应。
+// 已经成功结束的调用即使恰好在此时被取消，也当作成功返回。
+func markCanceled(ctx context.Context, value any, pluginError *apperr.Error) (any, *apperr.Error) {
+	if pluginError != nil {
+		return value, pluginError
+	}
+	invocation, ok := value.(*InvokeResult)
+	if !ok {
+		return value, nil
+	}
+	if invocation.OK || canceledByUser(ctx) == nil {
+		return invocation, nil
+	}
+	invocation.Canceled = true
+	return invocation, nil
+}
+
+// outboundPayloads 决定这次调用要发哪些消息。
+//
+// 客户端流与双向流用 messages 数组；一元与服务端流沿用单条 message。
+// 两者都没给时退回空对象，保证永远至少有一条可发的消息。
+func outboundPayloads(params InvokeParams) []json.RawMessage {
+	if len(params.Messages) > 0 {
+		return params.Messages
+	}
+	if len(strings.TrimSpace(string(params.Message))) > 0 {
+		return []json.RawMessage{params.Message}
+	}
+	return []json.RawMessage{json.RawMessage("{}")}
 }
 
 func invokeUnary(
@@ -289,72 +407,135 @@ func invokeUnary(
 	return result, nil
 }
 
-func invokeServerStream(
+// invokeStream 执行客户端流、服务端流与双向流。
+//
+// 收与发跑在两条执行线上：发送可能因为对端不读而阻塞，如果接收排在它后面，
+// 两边的缓冲会互相等死——对端等我们读，我们等对端读。并发接收保证我们一直在
+// "掏自己的口袋"，对端永远塞得进来，这也是双向流大载荷不会卡住的原因。
+func invokeStream(
 	ctx context.Context,
 	connection *grpc.ClientConn,
 	method protoreflect.MethodDescriptor,
 	fullMethod string,
-	requestMessage proto.Message,
+	outbound []proto.Message,
 	started time.Time,
 ) (any, *apperr.Error) {
-	stream, err := connection.NewStream(ctx, &grpc.StreamDesc{
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	stream, err := connection.NewStream(streamCtx, &grpc.StreamDesc{
 		StreamName:    string(method.Name()),
-		ServerStreams: true,
+		ClientStreams: method.IsStreamingClient(),
+		ServerStreams: method.IsStreamingServer(),
 	}, fullMethod,
 		grpc.MaxCallRecvMsgSize(maxGRPCMessageBytes),
 		grpc.MaxCallSendMsgSize(maxGRPCMessageBytes),
 	)
 	if err != nil {
-		return &InvokeResult{
-			OK:        false,
-			Method:    fullMethod,
-			Status:    StatusInfoFromError(err),
-			Metadata:  []common.KeyValue{},
-			Trailers:  []common.KeyValue{},
-			ElapsedMs: time.Since(started).Milliseconds(),
-		}, nil
-	}
-	if err := stream.SendMsg(requestMessage); err != nil {
-		return &InvokeResult{OK: false, Method: fullMethod, Status: StatusInfoFromError(err), Metadata: []common.KeyValue{}, Trailers: []common.KeyValue{}, ElapsedMs: time.Since(started).Milliseconds()}, nil
-	}
-	if err := stream.CloseSend(); err != nil {
-		return &InvokeResult{OK: false, Method: fullMethod, Status: StatusInfoFromError(err), Metadata: []common.KeyValue{}, Trailers: []common.KeyValue{}, ElapsedMs: time.Since(started).Milliseconds()}, nil
+		return failedStreamResult(fullMethod, err, started), nil
 	}
 
-	messages := make([]string, 0, 8)
-	totalBytes := 0
-	var callError error
-	for len(messages) < maxStreamMessages && totalBytes < maxStreamBytes {
-		responseMessage := dynamicpb.NewMessage(method.Output())
-		if receiveError := stream.RecvMsg(responseMessage); receiveError != nil {
-			if !errors.Is(receiveError, io.EOF) {
-				callError = receiveError
-			}
+	received := make(chan streamOutcome, 1)
+	go func() { received <- receiveStream(stream, method, cancel) }()
+
+	var sendError error
+	for _, message := range outbound {
+		if err := stream.SendMsg(message); err != nil {
+			sendError = err
+			cancel()
 			break
 		}
-		encoded, marshalError := marshalProtoJSON(responseMessage)
-		if marshalError != nil {
-			callError = marshalError
-			break
+	}
+	if sendError == nil {
+		if err := stream.CloseSend(); err != nil {
+			sendError = err
+			cancel()
 		}
-		messages = append(messages, string(encoded))
-		totalBytes += len(encoded)
+	}
+
+	outcome := <-received
+	callError := outcome.err
+	if sendError != nil {
+		// 服务端明确给了状态时以它为准（Canceled/Unavailable 通常是我们取消的副产物），
+		// 否则发送侧的失败更能说明问题。
+		code := status.Code(callError)
+		if callError == nil || code == codes.Canceled || code == codes.Unavailable {
+			callError = sendError
+		}
 	}
 
 	header, _ := stream.Header()
-	result := &InvokeResult{
-		OK:        callError == nil,
-		Method:    fullMethod,
-		Status:    StatusInfoFromError(callError),
-		Messages:  messages,
-		Streaming: true,
-		Truncated: callError == nil && (len(messages) >= maxStreamMessages || totalBytes >= maxStreamBytes),
-		Metadata:  metadataEntries(header),
-		Trailers:  metadataEntries(stream.Trailer()),
-		ElapsedMs: time.Since(started).Milliseconds(),
-		SizeBytes: totalBytes,
+	return &InvokeResult{
+		OK:         callError == nil,
+		Method:     fullMethod,
+		Status:     StatusInfoFromError(callError),
+		Messages:   outcome.messages,
+		Streaming:  true,
+		StreamKind: streamKind(method),
+		Truncated:  outcome.truncated,
+		Metadata:   metadataEntries(header),
+		Trailers:   metadataEntries(stream.Trailer()),
+		ElapsedMs:  time.Since(started).Milliseconds(),
+		SizeBytes:  outcome.sizeBytes,
+	}, nil
+}
+
+type streamOutcome struct {
+	messages  []string
+	sizeBytes int
+	truncated bool
+	err       error
+}
+
+// receiveStream 一直读到流结束或达到展示上限。
+//
+// 达到上限时必须取消整个流：我们不再读了，对端就会卡在发送上，
+// 取消是唯一能让它退出的方式。
+func receiveStream(stream grpc.ClientStream, method protoreflect.MethodDescriptor, cancel context.CancelFunc) streamOutcome {
+	outcome := streamOutcome{messages: make([]string, 0, 8)}
+	for {
+		responseMessage := dynamicpb.NewMessage(method.Output())
+		if receiveError := stream.RecvMsg(responseMessage); receiveError != nil {
+			if !errors.Is(receiveError, io.EOF) {
+				outcome.err = receiveError
+			}
+			return outcome
+		}
+		encoded, marshalError := marshalProtoJSON(responseMessage)
+		if marshalError != nil {
+			outcome.err = marshalError
+			return outcome
+		}
+		outcome.messages = append(outcome.messages, string(encoded))
+		outcome.sizeBytes += len(encoded)
+		if len(outcome.messages) >= maxStreamMessages || outcome.sizeBytes >= maxStreamBytes {
+			outcome.truncated = true
+			cancel()
+			return outcome
+		}
 	}
-	return result, nil
+}
+
+func failedStreamResult(fullMethod string, err error, started time.Time) *InvokeResult {
+	return &InvokeResult{
+		OK:        false,
+		Method:    fullMethod,
+		Status:    StatusInfoFromError(err),
+		Metadata:  []common.KeyValue{},
+		Trailers:  []common.KeyValue{},
+		ElapsedMs: time.Since(started).Milliseconds(),
+	}
+}
+
+// streamKind 把描述符上的两个布尔值翻成界面用的流类型。
+func streamKind(method protoreflect.MethodDescriptor) string {
+	if method.IsStreamingClient() && method.IsStreamingServer() {
+		return "bidi"
+	}
+	if method.IsStreamingClient() {
+		return "client"
+	}
+	return "server"
 }
 
 func dialGRPC(params TargetParams) (*grpc.ClientConn, *apperr.Error) {
@@ -408,16 +589,27 @@ func normalizeGRPCTarget(raw string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-func grpcContext(timeoutMs int, entries []common.KeyValue) (context.Context, context.CancelFunc, *apperr.Error) {
+func grpcContext(parent context.Context, timeoutMs int, entries []common.KeyValue) (context.Context, context.CancelFunc, *apperr.Error) {
 	values, err := metadataFromEntries(entries)
 	if err != nil {
 		return nil, nil, apperr.Invalid(err.Error())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(common.ClampInt(timeoutMs, defaultGRPCTimeoutMs, 1, maxGRPCTimeoutMs))*time.Millisecond)
+	ctx, cancel := context.WithTimeout(parent, time.Duration(common.ClampInt(timeoutMs, defaultGRPCTimeoutMs, 1, maxGRPCTimeoutMs))*time.Millisecond)
 	if len(values) > 0 {
 		ctx = metadata.NewOutgoingContext(ctx, values)
 	}
 	return ctx, cancel, nil
+}
+
+// canceledByUser 判断这次失败是否由"用户点了终止"引起。
+//
+// context.Cause 会沿父子链取出我们写入的 apperr.ErrCanceled；派生出的
+// WithTimeout 上下文超时则得到 DeadlineExceeded，不会被误判为终止。
+func canceledByUser(ctx context.Context) *apperr.Error {
+	if errors.Is(context.Cause(ctx), apperr.ErrCanceled) {
+		return apperr.Canceled()
+	}
+	return nil
 }
 
 func metadataFromEntries(entries []common.KeyValue) (metadata.MD, error) {

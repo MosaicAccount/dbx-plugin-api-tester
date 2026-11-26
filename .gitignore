@@ -9,3 +9,8 @@
 
 # Vite 构建产物：由 npm run build 生成，源码在 src/。
 /ui/
+
+# 本机 Go 构建缓存（写入 ~/go 受限时临时使用，不参与提交）。
+/.tmp-modcache/
+/.tmp-gopath/
+/.tmp-gocache/

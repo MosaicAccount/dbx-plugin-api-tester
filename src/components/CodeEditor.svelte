@@ -12,6 +12,7 @@
     placeholder = "",
     disabled = false,
     json = false,
+    fill = false,
     ariaLabel = "",
     onchange = () => {},
   } = $props();
@@ -34,7 +35,7 @@
   });
 </script>
 
-<div class="code-editor">
+<div class="code-editor" class:is-fill={fill}>
   <pre class="code-highlight" aria-hidden="true" bind:this={highlight}>{@html html}</pre>
   <textarea
     class="code-area"

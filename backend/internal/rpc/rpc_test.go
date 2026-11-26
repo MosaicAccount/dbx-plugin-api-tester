@@ -2,7 +2,10 @@ package rpc
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/jlian/dbx-plugin-api-tester/internal/apperr"
 )
@@ -22,8 +25,8 @@ func TestPingReportsIdentityAndMethods(t *testing.T) {
 	if !ping.OK || ping.ID != "com.jlian.apitester" || ping.Version != "0.0.1" {
 		t.Fatalf("unexpected ping payload: %+v", ping)
 	}
-	if len(ping.Methods) != 4 {
-		t.Fatalf("expected 4 methods, got %v", ping.Methods)
+	if len(ping.Methods) != 5 {
+		t.Fatalf("expected 5 methods, got %v", ping.Methods)
 	}
 }
 
@@ -45,7 +48,7 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 func TestMalformedParamsReturnsInvalidParams(t *testing.T) {
 	handler := New("com.jlian.apitester", "0.0.1")
 
-	for _, method := range []string{MethodHTTPSend, MethodGRPCServices, MethodGRPCMethods, MethodGRPCInvoke} {
+	for _, method := range []string{MethodHTTPSend, MethodGRPCServices, MethodGRPCMethods, MethodGRPCInvoke, MethodRequestCancel} {
 		_, err := handler.Dispatch(method, json.RawMessage(`{"timeoutMs":"not-a-number"}`))
 		if err == nil {
 			t.Fatalf("%s: expected an error", method)
@@ -81,5 +84,99 @@ func TestDeclaredMethodsAreImplemented(t *testing.T) {
 		if err != nil && err.Code == apperr.CodeMethodNotFound {
 			t.Fatalf("%s is declared but not implemented", method)
 		}
+	}
+}
+
+func TestCancelUnknownRequestIsNotAnError(t *testing.T) {
+	handler := New("com.jlian.apitester", "0.0.1")
+
+	result, err := handler.Dispatch(MethodRequestCancel, json.RawMessage(`{"requestId":"missing"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	canceled, ok := result.(*CancelResult)
+	if !ok || canceled.Canceled {
+		t.Fatalf("expected canceled=false for an unknown request, got %#v", result)
+	}
+}
+
+func TestCancelRequiresRequestID(t *testing.T) {
+	handler := New("com.jlian.apitester", "0.0.1")
+
+	_, err := handler.Dispatch(MethodRequestCancel, json.RawMessage(`{"requestId":"  "}`))
+	if err == nil || err.Code != apperr.CodeInvalidParams {
+		t.Fatalf("expected invalid-params, got %#v", err)
+	}
+}
+
+// 请求正在阻塞时，第二条 RPC（request/cancel）必须能立刻打断它：
+// 这正是"发送后可以点终止"的完整链路，不能只在 httptool 层验证。
+func TestCancelStopsInFlightRequest(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		<-release
+		_, _ = writer.Write([]byte("late"))
+	}))
+	defer server.Close()
+	defer close(release)
+
+	handler := New("com.jlian.apitester", "0.0.1")
+	params, marshalError := json.Marshal(map[string]any{
+		"method":    "GET",
+		"url":       server.URL,
+		"timeoutMs": 5000,
+		"requestId": "req-1",
+	})
+	if marshalError != nil {
+		t.Fatalf("cannot marshal params: %v", marshalError)
+	}
+
+	type outcome struct {
+		result any
+		err    *apperr.Error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := handler.Dispatch(MethodHTTPSend, params)
+		done <- outcome{result: result, err: err}
+	}()
+
+	// 取消可能比 send 的登记更早到达（会被登记表记为预取消），所以这里
+	// 一直重试到真正命中，或者 send 已经返回。
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		result, err := handler.Dispatch(MethodRequestCancel, json.RawMessage(`{"requestId":"req-1"}`))
+		if err != nil {
+			t.Fatalf("unexpected cancel error: %v", err)
+		}
+		if result.(*CancelResult).Canceled {
+			break
+		}
+		select {
+		case out := <-done:
+			assertCanceledOutcome(t, out.result, out.err)
+			return
+		case <-time.After(5 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the request was never registered for cancellation")
+		}
+	}
+
+	select {
+	case out := <-done:
+		assertCanceledOutcome(t, out.result, out.err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("http/send did not return after request/cancel")
+	}
+}
+
+func assertCanceledOutcome(t *testing.T, result any, err *apperr.Error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected a canceled error, got result %#v", result)
+	}
+	if err.Kind != apperr.KindCanceled {
+		t.Fatalf("expected canceled kind, got %q (%s)", err.Kind, err.Message)
 	}
 }

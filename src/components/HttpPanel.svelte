@@ -1,15 +1,14 @@
 <script>
   /**
-   * HTTP 请求编辑面板。
+   * HTTP 请求编辑面板（tab 内容）。
    *
-   * 只负责展示与收集输入，所有状态变更都调 store 的 action。
-   * 面板内部的 tab（参数/请求头/请求体/选项）是本组件的局部状态。
+   * 方法 / URL 那一行在 HttpRequestBar 里，占满整行；这里只负责
+   * 参数 / 请求头 / 请求体 / 选项四个 tab 的内容。
    */
   import SelectMenu from "./SelectMenu.svelte";
   import KVEditor from "./KVEditor.svelte";
   import CodeEditor from "./CodeEditor.svelte";
   import {
-    HTTP_METHODS,
     HTTP_TIMEOUT_DEFAULT,
     TIMEOUT_MAX,
     BODY_TYPES,
@@ -18,15 +17,19 @@
     contentTypeForBody,
     buildRequestUrl,
   } from "../lib/model.js";
-  import { patchHttp, sendHttp, showToast } from "../lib/store.js";
+  import { patchHttp, showToast } from "../lib/store.js";
 
-  let { t, http, sending = false } = $props();
+  /**
+   * @type {{
+   *   t: (key: string, variables?: Record<string, unknown>) => string,
+   *   http: any,
+   *   defaultTimeout?: number,
+   * }}
+   */
+  let { t, http, defaultTimeout = HTTP_TIMEOUT_DEFAULT } = $props();
 
   let tab = $state("params");
 
-  const methodItems = $derived(
-    [...new Set([...HTTP_METHODS, http.method])].map((method) => ({ value: method, label: method })),
-  );
   const effectiveUrl = $derived.by(() => {
     const raw = http.url.trim();
     if (!raw) return "";
@@ -54,32 +57,6 @@
 </script>
 
 <div class="editor-pane">
-  <div class="request-bar">
-    <SelectMenu
-      items={methodItems}
-      value={http.method}
-      ariaLabel="HTTP method"
-      onchange={(value) => patchHttp({ method: value })}
-    />
-    <input
-      class="input url-input"
-      type="text"
-      spellcheck="false"
-      placeholder={t("urlPlaceholder")}
-      aria-label="URL"
-      value={http.url}
-      oninput={(event) => patchHttp({ url: event.currentTarget.value })}
-      onkeydown={(event) => {
-        if (event.key !== "Enter") return;
-        event.preventDefault();
-        void sendHttp();
-      }}
-    />
-    <button class="btn btn-primary" type="button" disabled={sending} onclick={() => void sendHttp()}>
-      {sending ? t("sending") : t("send")}
-    </button>
-  </div>
-
   <div class="tabs">
     {#each ["params", "headers", "body", "options"] as name (name)}
       <button
@@ -113,7 +90,7 @@
       <p class="hint">{t("headerHint")}</p>
     </div>
   {:else if tab === "body"}
-    <div class="tab-panel is-active">
+    <div class="tab-panel is-active tab-panel--fill">
       <div class="panel-row">
         <SelectMenu
           items={bodyTypeOptions}
@@ -131,9 +108,10 @@
       {:else}
         <CodeEditor
           value={http.bodyText}
-          placeholder="Request body"
+          placeholder={t("bodyPlaceholder")}
           ariaLabel={t("body")}
           json={bodyType === "json"}
+          fill
           onchange={(value) => patchHttp({ bodyText: value })}
         />
         <p class="hint">{t("contentTypeHint", { type: contentTypeForBody(bodyType) })}</p>
@@ -142,7 +120,7 @@
   {:else}
     <div class="tab-panel is-active">
       <div class="form-grid">
-        <label class="field">
+        <div class="field">
           <span>{t("timeout")}</span>
           <input
             class="input"
@@ -150,11 +128,15 @@
             min="1"
             max={TIMEOUT_MAX}
             step="1000"
+            aria-label={t("timeout")}
             value={http.timeoutMs}
             oninput={(event) =>
               patchHttp({ timeoutMs: clampNumber(event.currentTarget.value, HTTP_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX) })}
           />
-        </label>
+          <button class="link-btn field-action" type="button" onclick={() => patchHttp({ timeoutMs: defaultTimeout })}>
+            {t("useDefaultTimeout", { value: defaultTimeout })}
+          </button>
+        </div>
         <label class="check">
           <input
             type="checkbox"
@@ -180,5 +162,18 @@
 <style>
   .grow {
     flex: 1;
+  }
+
+  .field-action {
+    padding: 0;
+    color: var(--muted);
+    font-size: 11px;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .field-action:hover {
+    color: var(--fg);
+    text-decoration: underline;
   }
 </style>

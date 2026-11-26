@@ -8,19 +8,26 @@
 - 常用方法、完整 URL、查询参数表格（自动编码并合并进 URL）
 - 请求头编辑，JSON / 文本 / XML / 表单请求体，自动补充 `Content-Type`
 - 超时、跟随/禁用重定向、跳过 TLS 校验（仅建议用于开发服务器）
+- 发送后可以点「终止」立即停止请求；到达超时时间也会自动停止，超时值支持全局默认 + 单请求覆盖
 - 响应状态、耗时、大小、响应头、重定向链
 - JSON 响应自动格式化并语法高亮；二进制响应以 base64 展示；大响应按上限截断并提示
 
 **gRPC**
-- 基于 Server Reflection 自动发现 service / method
+- 两种方法描述来源：Server Reflection，或导入本地 `.proto` 文件（适合没有开启反射的服务）
 - 动态 protobuf 编解码，请求消息直接用 JSON 编辑
-- 支持一元调用与服务端流式调用（客户端流、双向流暂不支持）
+- 支持一元、服务端流、客户端流与双向流；流式方法一次发送全部消息，再接收响应，响应在调用结束后统一展示（不做逐条实时刷新）
+- 客户端流 / 双向流的多条消息在固定高度列表里滚动，页面本身不滚动；「添加消息」固定在列表上方
 - Metadata 编辑、TLS、跳过 TLS 校验、超时；展示响应 Metadata 与 Trailers
+- 调用与「发现服务」过程中都可以点「终止」；超时同样支持全局默认与单请求覆盖
+- 流式调用被终止后，界面保留终止前已经收到的消息，并标记为「已终止」
 
 **工作台**
+- 接口信息（方法 / URL / 目标 / 描述来源）占满整行，下面的请求体、元数据与响应体左右分栏；
+  窄窗口自动切回上下排列，拖动中间分隔条或用方向键调整比例
 - 多级目录树：侧栏顶部 `+` 或目录行 `+` 可新建请求/子目录，目录支持折叠与删除
 - 请求保存/另存为、历史记录、草稿自动恢复；保存时从已有目录中选择，或直接新建目录
 - 中英文、浅色/深色主题（跟随 DBX 注入的 `--color-*` / `--radius-*` / `--font-*` token）
+- 顶栏「设置」可修改 HTTP / gRPC 的默认超时，新建请求会带上它
 - `Cmd/Ctrl + Enter` 发送请求，`Cmd/Ctrl + S` 保存，`Shift + Cmd/Ctrl + S` 另存为
 
 ## 安装与使用
@@ -49,13 +56,34 @@
 1. 在 HTTP 标签填写方法与 URL
 2. 用 **参数 / 请求头 / 请求体 / 选项** 配置请求
 3. 点击 **发送**，在下方查看状态、耗时、响应头和响应体
+4. 请求迟迟不返回时，点发送按钮位置的 **终止** 立即结束；到达超时时间也会自动结束
 
 ### gRPC
 
 1. 填写目标地址，例如 `localhost:50051`；TLS 服务勾选 **TLS**
-2. 点击 **发现服务**（服务端需开启 Server Reflection）
-3. 选择 service / method，填写 JSON 请求消息
-4. 点击 **调用**；服务端流式方法会展示多条消息
+2. 选择 **描述来源**：
+   - **服务端反射**：点击 **发现服务**（服务端需开启 Server Reflection）
+   - **Proto 文件**：点击 **导入 .proto** 或把文件拖进面板，点击 **解析文件** 即可发现服务；
+     目标地址仍用于真正发起调用，导入/解析阶段不会连接服务器
+3. 选择 service / method，填写 JSON 请求消息；客户端流 / 双向流可以点「添加消息」逐条填写，
+   新消息会自动加入列表底部并聚焦
+4. 点击 **调用**；流式方法会展示多条响应消息
+
+> 一个 `.proto` 文件依赖其他文件时要一起导入（同名文件会被拒绝）。单个文件上限 128 KB，
+> 导入总量上限 160 KB；历史记录不保存 proto 源码（避免挤占宿主存储），保存的请求会保留。
+> 导入后如果方法描述发生变化，可以再点一次 **解析文件**。切回 **服务端反射** 时已导入的
+> 文件会保留但不再显示，切回 **Proto 文件** 可继续使用。
+
+> 双向流目前是「一次发送、一次接收」：所有消息要在点「调用」之前填好。想按服务端回复
+> 决定下一条发什么的交互式用法尚未实现，设计记录见
+> [docs/grpc-interactive-streaming.md](docs/grpc-interactive-streaming.md)。
+
+本地没有现成的 gRPC 服务时，可以直接用仓库自带的测试服务 `examples/grpc-testserver`：
+它开启了 Server Reflection，四个方法分别覆盖一元、服务端流、客户端流、双向流。
+
+```bash
+cd examples/grpc-testserver && go run .    # 默认监听 localhost:50051
+```
 
 ## 项目结构
 
@@ -81,10 +109,13 @@ backend/
   main.go                # 仅装配：SDK 适配、panic 兜底、错误转换
   internal/apperr/       # 统一错误码与错误分类
   internal/values/       # 跨包共用类型
+  internal/inflight/     # 进行中请求的 requestId -> 取消函数注册表
   internal/httptool/     # HTTP 请求执行
-  internal/grpctool/     # gRPC 反射、动态编解码、调用
+  internal/grpctool/     # gRPC 反射、proto 文件编译、动态编解码与调用
   internal/rpc/          # JSON-RPC 分发与方法登记
   sdk/                   # 随插件 CLI 0.1.10 分发的 DBX Go SDK（见下）
+examples/grpc-testserver/ # 本地 gRPC 测试服务，覆盖四种调用方式（见其 README）
+docs/                    # 设计记录（交互式双向流尚未实现）
 assets/plugin.svg
 ```
 
@@ -123,7 +154,8 @@ npm run build                                 # 必须出现 DBX_UI_BUILD_SUCCES
 npx svelte-check --tsconfig ./jsconfig.json   # 期望 0 errors 0 warnings
 ```
 
-后端测试（HTTP 用 `httptest`，gRPC 起本地 health 服务 + reflection）：
+后端测试（HTTP 用 `httptest`，gRPC 起本地 health 服务 + reflection；proto 文件模式用内联
+`.proto` 源码覆盖 import、校验与无反射调用）：
 
 ```bash
 cd backend
@@ -147,7 +179,7 @@ npm run build          # 输出到 ui/，成功时打印 DBX_UI_BUILD_SUCCESS
 dbx-plugin package .
 ```
 
-本地产物是当前平台（本机为 `darwin-arm64`）的未签名候选包 `dist/com.jlian.apitester-0.1.0-darwin-arm64.dbxp` 及其 `.artifact.json`。
+本地产物是当前平台（本机为 `darwin-arm64`）的未签名候选包 `dist/com.jlian.apitester-0.1.1-SNAPSHOT-darwin-arm64.dbxp` 及其 `.artifact.json`。
 
 ### 多平台打包
 
@@ -164,6 +196,12 @@ dbx-plugin package .
 | `darwin-arm64` | `macos-15` |
 
 每个 target 产出独立的 `.dbxp` 和 `.artifact.json`，作为同一个 Release 的资产。插件 ID、名称和版本在所有包里保持一致，DBX 安装时按用户的 OS/CPU 选择对应包。
+
+复用 workflow 只上传 `.dbxp` 与 `release-candidates.json`，随后由同一次运行的 `sidecars` job 调用 `scripts/backfill-release-sidecars.mjs` 补传每个候选包对应的 `.artifact.json`：先核对已上传包的 `sha256`/`size`，只补缺失项，已有的只校验不覆盖。需要给历史 Release 补时，手动触发该 workflow 并传入 tag：
+
+```bash
+gh workflow run plugin-release.yml -f tag=v0.1.0
+```
 
 也可以直接在对应系统上执行 `dbx-plugin package .`；本机只能产出 `darwin-arm64`。
 

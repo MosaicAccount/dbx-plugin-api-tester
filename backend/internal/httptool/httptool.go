@@ -76,7 +76,10 @@ func SetVersion(version string) { buildVersion = version }
 func Version() string { return buildVersion }
 
 // Send 发起一次 HTTP 请求。
-func Send(params SendParams) (*SendResult, *apperr.Error) {
+//
+// ctx 由调用方提供（rpc 层为每个 requestId 建立可取消上下文）；超时在这里再
+// 叠加一层，两者任一触发都会中断请求。
+func Send(ctx context.Context, params SendParams) (*SendResult, *apperr.Error) {
 	method := strings.ToUpper(strings.TrimSpace(params.Method))
 	if method == "" {
 		method = http.MethodGet
@@ -141,7 +144,7 @@ func Send(params SendParams) (*SendResult, *apperr.Error) {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
 	request, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
@@ -177,12 +180,18 @@ func Send(params SendParams) (*SendResult, *apperr.Error) {
 	started := time.Now()
 	response, err := client.Do(request)
 	if err != nil {
+		if failure := contextFailure(ctx); failure != nil {
+			return nil, failure
+		}
 		return nil, httpTransportError(err)
 	}
 	defer response.Body.Close()
 
 	data, err := io.ReadAll(io.LimitReader(response.Body, int64(maxBody)+1))
 	if err != nil {
+		if failure := contextFailure(ctx); failure != nil {
+			return nil, failure
+		}
 		return nil, httpTransportError(err)
 	}
 	truncated := len(data) > maxBody
@@ -335,6 +344,20 @@ func classifyBody(data []byte, contentType string) string {
 	return "binary"
 }
 
+// contextFailure 优先返回"用户主动终止"或"超时"的明确分类。
+//
+// 网络层返回的 err 在取消场景下只是 context.Canceled，无法区分是谁取消的；
+// context.Cause 能看到我们写入的 apperr.ErrCanceled 哨兵。
+func contextFailure(ctx context.Context) *apperr.Error {
+	if errors.Is(context.Cause(ctx), apperr.ErrCanceled) {
+		return apperr.Canceled()
+	}
+	if errors.Is(context.Cause(ctx), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return apperr.Upstream(apperr.KindTimeout, "Request timed out")
+	}
+	return nil
+}
+
 func httpTransportError(err error) *apperr.Error {
 	kind := "network"
 	message := err.Error()
@@ -345,7 +368,10 @@ func httpTransportError(err error) *apperr.Error {
 		message = err.Error()
 	}
 
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) {
+		kind = "canceled"
+		message = "Request canceled"
+	} else if errors.Is(err, context.DeadlineExceeded) {
 		kind = "timeout"
 		message = "Request timed out"
 	}
