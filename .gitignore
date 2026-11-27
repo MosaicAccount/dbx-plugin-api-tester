@@ -14,6 +14,9 @@
 /docs/
 /examples/
 
+# 本机浏览器渲染缓存（预览/截图时生成，不参与提交）。
+/.tmp-render/
+
 # 本机 Go 构建缓存（写入 ~/go 受限时临时使用，不参与提交）。
 /.tmp-modcache/
 /.tmp-gopath/
