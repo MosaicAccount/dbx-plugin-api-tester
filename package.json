@@ -8,6 +8,7 @@
     "build": "vite build",
     "build:watch": "vite build --watch",
     "check": "svelte-check --tsconfig ./jsconfig.json",
+    "test:unit": "node --test tests/*.test.mjs",
     "test:scripts": "node --test scripts/*.test.mjs"
   },
   "devDependencies": {

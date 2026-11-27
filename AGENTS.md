@@ -85,6 +85,7 @@ assets/plugin.svg
 ```bash
 npm run build                      # 必须输出 DBX_UI_BUILD_SUCCESS
 npx svelte-check --tsconfig ./jsconfig.json   # 期望 0 errors 0 warnings
+npm run test:unit                  # tests/ 下纯函数单测（node --test，无浏览器依赖）
 ```
 
 后端：
