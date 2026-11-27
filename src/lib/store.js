@@ -58,6 +58,8 @@ import {
   toSnapshot,
   truncate,
   uid,
+  jsonIssue,
+  normalizeBodyType,
 } from "./model.js";
 import { responseText } from "./format.js";
 
@@ -102,6 +104,11 @@ function createInitialState() {
     download: null,
     /** 交互式会话（客户端流 / 双向流）的运行期状态；不持久化，见 createStreamState。 */
     stream: createStreamState(),
+    /**
+     * 发送前校验失败的原因（目前只有 JSON 正文）；null 表示没有拦下来的问题。
+     * 属于运行期状态，不进草稿/历史，编辑正文或切换请求时清空。
+     */
+    bodyIssue: null,
   };
 }
 
@@ -439,6 +446,7 @@ export function applySnapshotToState(snapshot) {
     http: normalized.http,
     grpc: normalized.grpc,
     responseTab: normalized.responseTab,
+    bodyIssue: null,
     // 切换请求时清掉上一次的发现结果，避免把 A 服务的 method 用到 B 服务上。
     response: null,
   }));
@@ -497,8 +505,18 @@ export function setProtocol(protocol) {
 }
 
 export function patchHttp(patch) {
-  update((s) => ({ ...s, http: { ...s.http, ...patch } }));
+  update((s) => ({
+    ...s,
+    // 正文、类型或方法一变，上一次的 JSON 校验结论就过期了，不能留着旧的错误条。
+    bodyIssue: "bodyText" in patch || "bodyType" in patch || "method" in patch ? null : s.bodyIssue,
+    http: { ...s.http, ...patch },
+  }));
   scheduleDraftPersist();
+}
+
+/** 关掉发送前校验的错误条。 */
+export function clearBodyIssue() {
+  update((s) => (s.bodyIssue ? { ...s, bodyIssue: null } : s));
 }
 
 // --- Form / Multipart Form 编辑 -------------------------------------------
@@ -1399,7 +1417,7 @@ export async function cancelCurrentRequest() {
  * 下载只是把响应写进本地文件，请求本身的合法性与发送完全一致，所以校验只保留一份：
  * 两边各写一遍迟早会漂移出"能发不能下"这种怪现象。返回 null 表示校验没通过（提示已弹）。
  */
-function buildHttpSendParams(s) {
+function buildHttpSendParams(s, { allowInvalidJson = false } = {}) {
   if (!s.http.url.trim()) {
     showToast(t("needUrl"), "warn");
     return null;
@@ -1439,6 +1457,16 @@ function buildHttpSendParams(s) {
     }
   }
 
+  // JSON 正文语法有问题时先拦住：发出去只会换一个 400，不如在这里定位到行列。
+  if (!allowInvalidJson && normalizeBodyType(s.http.bodyType) === "json") {
+    const issue = jsonIssue(s.http.bodyText);
+    if (issue) {
+      update((cur) => ({ ...cur, bodyIssue: issue }));
+      showToast(t("invalidJson"), "error");
+      return null;
+    }
+  }
+
   const headers = buildHeaders(s.http.headers, httpContentType(s.http));
   const timeoutMs = clampNumber(s.http.timeoutMs, HTTP_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX);
   const bodyParams = buildBodyParams(s.http);
@@ -1465,13 +1493,20 @@ function buildHttpSendParams(s) {
   return { params, payload };
 }
 
-export async function sendHttp() {
+/**
+ * 发送当前 HTTP 请求。
+ *
+ * `force` 用于「仍然发送」：跳过 JSON 语法校验，其余校验（URL、文件暂存、体积上限）
+ * 照旧——那些是发不出去的硬错误，不该被绕过。
+ */
+export async function sendHttp({ force = false } = {}) {
   const s = current();
   if (s.sending || s.discovering || !host.available) return false;
 
-  const built = buildHttpSendParams(s);
+  const built = buildHttpSendParams(s, { allowInvalidJson: force });
   if (!built) return false;
   const { params, payload } = built;
+  clearBodyIssue();
 
   const run = beginRun("http", "send");
   const started = performance.now();

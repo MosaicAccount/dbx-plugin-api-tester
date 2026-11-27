@@ -19,16 +19,17 @@
     normalizeBodyType,
     buildRequestUrl,
   } from "../lib/model.js";
-  import { addFormRow, patchHttp, showToast } from "../lib/store.js";
+  import { addFormRow, clearBodyIssue, patchHttp, sendHttp, showToast } from "../lib/store.js";
 
   /**
    * @type {{
    *   t: (key: string, variables?: Record<string, unknown>) => string,
    *   http: any,
    *   defaultTimeout?: number,
+   *   bodyIssue?: { message: string, line: number, column: number } | null,
    * }}
    */
-  let { t, http, defaultTimeout = HTTP_TIMEOUT_DEFAULT } = $props();
+  let { t, http, defaultTimeout = HTTP_TIMEOUT_DEFAULT, bodyIssue = null } = $props();
 
   let tab = $state("params");
 
@@ -56,6 +57,11 @@
   const bodyPlaceholder = $derived(
     bodyType === "json" ? t("bodyPlaceholderJson") : bodyType === "xml" ? t("bodyPlaceholderXml") : t("bodyPlaceholder"),
   );
+
+  // 发送被拦下时用户可能正停在别的 tab：切回请求体，别让错误条藏在看不见的地方。
+  $effect(() => {
+    if (bodyIssue) tab = "body";
+  });
 
   function formatBody() {
     if (http.bodyType !== "json") return;
@@ -132,6 +138,24 @@
       {:else if bodySpec.editor === "kv" || bodySpec.editor === "multipart"}
         <FormEditor {t} {http} />
       {:else}
+        {#if bodyIssue}
+          <!-- 发送被拦下来了：给出可定位的信息，并留一个「仍然发送」的出口。 -->
+          <div class="body-issue" role="alert">
+            <span class="body-issue-text" title={bodyIssue.message}>{t("jsonInvalidBody")}</span>
+            {#if bodyIssue.line > 0}
+              <span class="body-issue-pos">
+                {t("jsonIssuePosition", { line: bodyIssue.line, column: bodyIssue.column })}
+              </span>
+            {/if}
+            <span class="grow"></span>
+            {#if bodyType === "json"}
+              <button class="btn btn-ghost btn-sm" type="button" onclick={() => void sendHttp({ force: true })}>
+                {t("sendAnyway")}
+              </button>
+            {/if}
+            <button class="btn btn-ghost btn-sm" type="button" onclick={clearBodyIssue}>{t("dismiss")}</button>
+          </div>
+        {/if}
         <CodeEditor
           value={http.bodyText}
           placeholder={bodyPlaceholder}
@@ -187,6 +211,32 @@
 <style>
   .grow {
     flex: 1;
+  }
+
+  /* 发送前校验的错误条：和响应面板的错误提示同一套语气（警示色描边 + 浅底）。 */
+  .body-issue {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    padding: 6px 10px;
+    border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+
+  .body-issue-text {
+    color: var(--fg);
+    font-weight: 600;
+  }
+
+  .body-issue-pos {
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    white-space: nowrap;
   }
 
   .field-action {

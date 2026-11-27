@@ -739,6 +739,37 @@ export function buildBodyParams(http) {
   };
 }
 
+/**
+ * 校验 JSON 正文，返回带行列的错误；没有问题或正文为空时返回 null。
+ *
+ * 发送前拦截用的是和「格式化」同一个 JSON.parse。错误位置优先取 V8 消息里现成的
+ * `line N column M`，退一步再用 `position N` 自己换算；都取不到时 line/column 为 0，
+ * 界面只显示消息。
+ */
+export function jsonIssue(text) {
+  const raw = typeof text === "string" ? text : "";
+  if (!raw.trim()) return null;
+  try {
+    JSON.parse(raw);
+    return null;
+  } catch (error) {
+    const message = String(error?.message || "Invalid JSON");
+    const lineColumn = /line (\d+) column (\d+)/i.exec(message);
+    if (lineColumn) return { message, line: Number(lineColumn[1]), column: Number(lineColumn[2]) };
+    const position = /position (\d+)/i.exec(message);
+    if (position) {
+      const offset = Number(position[1]);
+      const before = raw.slice(0, offset);
+      return {
+        message,
+        line: before.split("\n").length,
+        column: offset - before.lastIndexOf("\n"),
+      };
+    }
+    return { message, line: 0, column: 0 };
+  }
+}
+
 /** 拼出发送用的请求头，并在用户没填 Content-Type 时补上推断出的值。 */
 export function buildHeaders(headers, contentType) {
   const result = [];

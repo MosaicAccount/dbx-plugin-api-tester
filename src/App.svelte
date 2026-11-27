@@ -637,7 +637,12 @@
       <div class="workspace" class:is-resizing={resizingSplit} bind:this={workspace} style:--split={$layoutStore.split}>
         <section class="editor">
           {#if $appState.protocol === "http"}
-            <HttpPanel {t} http={$appState.http} defaultTimeout={$appState.settings.httpTimeoutMs} />
+            <HttpPanel
+              {t}
+              http={$appState.http}
+              defaultTimeout={$appState.settings.httpTimeoutMs}
+              bodyIssue={$appState.bodyIssue}
+            />
           {:else}
             <GrpcPanel
               {t}
