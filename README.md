@@ -7,8 +7,9 @@
 **HTTP**
 - 常用方法、完整 URL、查询参数表格（自动编码并合并进 URL）
 - 请求头编辑，JSON / 文本 / XML / 表单请求体：JSON 高亮与格式化
-- 表单与 Multipart 表单是两种独立类型，共用一套「文本 / 文件」混排行编辑；Multipart 的
-  boundary 与 `Content-Type` 由 sidecar 生成，普通表单发 `application/x-www-form-urlencoded`
+- 请求体类型里的 `Form` 与 `Multipart Form` 是两种独立类型，共用一套「文本 / 文件」混排行编辑；
+  前者按 `application/x-www-form-urlencoded` 编码，后者（`multipart/form-data`）的 boundary 与
+  `Content-Type` 由 sidecar 生成。
 - 一个字段名可以挂多个文件（多选追加，生成多个同名 part）；字段名不会被文件名覆盖，留空时按 `file` 发送
 - 文件按 512 KiB 分块暂存到 sidecar 临时文件，发送时流式拼装，发送后暂存保留、可重复发送；单文件 ≤ 1 GB、合计 ≤ 5 GB（仅受临时磁盘空间约束，可按需调整）；
   内容不写草稿/历史，重新打开请求后需要重新选择

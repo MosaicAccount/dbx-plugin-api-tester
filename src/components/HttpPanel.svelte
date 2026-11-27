@@ -35,13 +35,22 @@
     if (!raw) return "";
     return buildRequestUrl(raw, http.params) || raw;
   });
+  /**
+   * 请求体分组标题的图标（12×12 viewBox 的单条 path，由 SelectMenu 统一描边）。
+   * 图标只出现在组标题上，选项行保持纯文字，两者一眼能分开。
+   */
+  const GROUP_ICON_FORM = "M2.5 2.4h7v7.2h-7zM4.5 5h3M4.5 7h2";
+  const GROUP_ICON_RAW = "M4.6 3.2 2.2 6l2.4 2.8M7.4 3.2 9.8 6 7.4 8.8";
+  const GROUP_ICON_OTHER = "M2.8 2.8h2.2v2.2h-2.2zM7 2.8h2.2v2.2h-2.2zM2.8 7h2.2v2.2h-2.2zM7 7h2.2v2.2h-2.2z";
+
+  // 按表单 / 原始 / 其他分组，和 Bruno 的请求体下拉保持一致。
   const bodyTypeOptions = $derived([
-    { value: "none", label: t("none") },
-    { value: "json", label: "JSON" },
-    { value: "text", label: t("text") },
-    { value: "xml", label: "XML" },
-    { value: "form", label: t("form") },
-    { value: "multipart", label: t("multipart") },
+    { value: "form", label: t("form"), group: t("bodyGroupForm"), groupIcon: GROUP_ICON_FORM },
+    { value: "multipart", label: t("multipart"), group: t("bodyGroupForm"), groupIcon: GROUP_ICON_FORM },
+    { value: "json", label: "JSON", group: t("bodyGroupRaw"), groupIcon: GROUP_ICON_RAW },
+    { value: "text", label: t("text"), group: t("bodyGroupRaw"), groupIcon: GROUP_ICON_RAW },
+    { value: "xml", label: "XML", group: t("bodyGroupRaw"), groupIcon: GROUP_ICON_RAW },
+    { value: "none", label: t("bodyNone"), group: t("bodyGroupOther"), groupIcon: GROUP_ICON_OTHER },
   ]);
   const bodyType = $derived(BODY_TYPES.includes(http.bodyType) ? http.bodyType : "none");
   // 占位提示跟着类型走：同一个编辑器在 JSON / 文本 / XML 下提示不一样。
@@ -120,7 +129,7 @@
         {/if}
       </div>
       {#if bodyType === "none"}
-        <p class="hint">{t("none")}</p>
+        <p class="hint">{t("noBodyHint")}</p>
       {:else if bodyType === "form" || bodyType === "multipart"}
         <FormEditor {t} {http} />
       {:else}

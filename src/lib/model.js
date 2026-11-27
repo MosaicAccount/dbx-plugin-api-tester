@@ -95,7 +95,7 @@ export function defaultHttp(settings) {
     headers: [blankKV()],
     bodyType: "none",
     bodyText: "",
-    // 表单行由「表单」与「Multipart 表单」共用：文本行发普通字段，文件行可以挂
+    // 表单行由 Form 与 Multipart Form 共用：文本行发普通字段，文件行可以挂
     // 多个文件（同一个字段名生成多个 part）。文件内容暂存在 sidecar，快照只带
     // 文件名 / 类型 / 大小，重新打开后需要重新选择。
     formRows: [],

@@ -501,7 +501,7 @@ export function patchHttp(patch) {
   scheduleDraftPersist();
 }
 
-// --- 表单 / Multipart 编辑 -------------------------------------------------
+// --- Form / Multipart Form 编辑 -------------------------------------------
 
 /** 用最新状态更新表单行，避免事件闭包里的旧数组覆盖用户刚输入的内容。 */
 export function updateFormRows(updater) {

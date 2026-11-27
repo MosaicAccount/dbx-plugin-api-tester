@@ -2,9 +2,9 @@
   /**
    * 表单请求体编辑器（urlencoded / multipart 共用一套行）。
    *
-   * 「表单」类型只发文本字段；「Multipart 表单」类型下每行还能在「文本 / 文件」之间
-   * 切换，一个字段名可以挂多个文件（生成多个同名字段）。编码方式完全由 bodyType
-   * 决定，不再按内容猜测，也没有「强制 multipart」按钮。
+   * `Form` 只发文本字段（application/x-www-form-urlencoded）；`Multipart Form` 下每行
+   * 还能在「文本 / 文件」之间切换，一个字段名可以挂多个文件（生成多个同名字段）。
+   * 编码方式完全由 bodyType 决定，不再按内容猜测，也没有「强制 multipart」按钮。
    *
    * 文件由宿主分块读出并暂存在 sidecar，快照只保存文件名 / 类型 / 大小；重新打开
    * 请求后需要重新选择。
@@ -33,6 +33,13 @@
   const multipart = $derived(http.bodyType === "multipart");
   const fileCount = $derived(formFileCount(rows));
   const fileBytes = $derived(multipartTotalBytes(rows));
+  // 空行不进快照（normalizeFormRows 会丢掉没有内容的行），所以每次进入编辑器都要
+  // 自己补一行：否则新建请求或重新打开已保存请求时，面板是一片空白，既没有焦点也
+  // 看不出该从哪里开始输入。
+  $effect(() => {
+    if (!rows.length) addFormRow("text");
+  });
+
   /** 选择文件：优先宿主文件对话框，宿主不支持时退回浏览器文件选择器。 */
   async function chooseFiles(rowIndex, { fileId = "", multiple = true } = {}) {
     if (host.canPickFiles()) {
@@ -82,13 +89,25 @@
 
 {#if multipart}
   {#if fileCount > 0}
-    <p class="hint form-files-summary">{t("formFilesSummary", { count: fileCount, size: formatBytes(fileBytes) })}</p>
+    <div class="form-files-summary">
+      <svg class="form-files-summary-icon" viewBox="0 0 12 12" width="12" height="12" fill="none" aria-hidden="true">
+        <path
+          d="M7.2 3.2 4.1 6.3a1.5 1.5 0 0 0 2.1 2.1l3.2-3.2a2.5 2.5 0 0 0-3.6-3.6L2.5 5a3.5 3.5 0 0 0 5 5l2.4-2.4"
+          stroke="currentColor"
+          stroke-width="1.2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+      <span class="form-files-count">{t("formFilesCount", { count: fileCount })}</span>
+      <span class="form-files-size">{formatBytes(fileBytes)}</span>
+    </div>
   {/if}
 {/if}
 
 <div class="kv-editor form-editor">
   {#each rows as row, index (index)}
-    <div class="kv-row form-row" class:is-multipart={multipart}>
+    <div class="kv-row form-row" class:is-multipart={multipart} class:has-files={multipart && row.kind === "file"}>
       <input
         type="checkbox"
         checked={row.enabled !== false}
@@ -106,7 +125,7 @@
           onclick={() => setFormRowKind(index, row.kind === "file" ? "text" : "file")}
         >
           {#if row.kind === "file"}
-            <svg viewBox="0 0 12 12" width="11" height="11" fill="none" aria-hidden="true"
+            <svg viewBox="0 0 12 12" width="13" height="13" fill="none" aria-hidden="true"
               ><path
                 d="M3.2 1.5h3.6L9.4 4.2v6.3H3.2z"
                 stroke="currentColor"
