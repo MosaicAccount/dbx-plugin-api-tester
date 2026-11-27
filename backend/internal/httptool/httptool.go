@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -38,11 +39,67 @@ type SendParams struct {
 	BodyText        string            `json:"bodyText"`
 	BodyBase64      string            `json:"bodyBase64"`
 	BodyEncoding    string            `json:"bodyEncoding"`
+	Multipart       *MultipartBody    `json:"multipart"`
 	TimeoutMs       int               `json:"timeoutMs"`
 	FollowRedirects *bool             `json:"followRedirects"`
 	MaxRedirects    int               `json:"maxRedirects"`
 	SkipTLSVerify   bool              `json:"skipTlsVerify"`
 	MaxBodyBytes    int               `json:"maxBodyBytes"`
+}
+
+// MultipartBody 是 multipart/form-data 请求体：文本字段 + 文件部件。
+//
+// 文件内容以 base64 传入（沙箱拿不到本地路径），由 sidecar 在发送时按
+// mime/multipart 组装，boundary 与 Content-Type 也在这里生成。
+type MultipartBody struct {
+	Fields []values.KeyValue `json:"fields"`
+	Files  []MultipartFile   `json:"files"`
+}
+
+// MultipartFile 是一个文件部件；FileName 是发给服务端的原始文件名。
+//
+// 文件内容有两种来源：UploadID 指向 sidecar 里已经分块暂存的文件（正常路径，
+// 支持大文件）；Base64 是内联内容（保留给旧调用与单元测试，受单请求大小上限约束）。
+type MultipartFile struct {
+	Name        string `json:"name"`
+	FileName    string `json:"fileName"`
+	ContentType string `json:"contentType"`
+	Base64      string `json:"base64"`
+	UploadID    string `json:"uploadId"`
+}
+
+// UploadResolver 由 rpc 层注入，用来读取分块暂存的文件。
+// 接口放在这里而不是直接依赖 uploads 包，避免 httptool 反向绑定存储实现。
+//
+// 发送只读取暂存文件，不负责删除：同一个请求经常需要重复发送，文件应一直可用，
+// 直到前端显式 abort（移除文件/切换请求）或暂存区按空闲时间回收。
+type UploadResolver interface {
+	Stat(uploadID string) (int64, *apperr.Error)
+	Open(uploadID string) (io.ReadCloser, *apperr.Error)
+}
+
+// bodyPlan 是待发送的请求正文：长度已知、可以按需重建（重定向时 GetBody 会再调
+// 一次 open），multipart 的临时文件只在新一次 open 时才打开。
+type bodyPlan struct {
+	contentType string
+	length      int64
+	open        func() (io.ReadCloser, error)
+}
+
+type multiReadCloser struct {
+	io.Reader
+	closers []io.Closer
+}
+
+func (m *multiReadCloser) Close() error {
+	var first error
+	for _, closer := range m.closers {
+		if err := closer.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	m.closers = nil
+	return first
 }
 
 type Redirect struct {
@@ -80,6 +137,11 @@ func Version() string { return buildVersion }
 // ctx 由调用方提供（rpc 层为每个 requestId 建立可取消上下文）；超时在这里再
 // 叠加一层，两者任一触发都会中断请求。
 func Send(ctx context.Context, params SendParams) (*SendResult, *apperr.Error) {
+	return SendWithUploads(ctx, params, nil)
+}
+
+// SendWithUploads 与 Send 相同，但可以用 uploads 解析分块暂存的文件。
+func SendWithUploads(ctx context.Context, params SendParams, uploads UploadResolver) (*SendResult, *apperr.Error) {
 	method := strings.ToUpper(strings.TrimSpace(params.Method))
 	if method == "" {
 		method = http.MethodGet
@@ -93,7 +155,7 @@ func Send(ctx context.Context, params SendParams) (*SendResult, *apperr.Error) {
 		return nil, apperr.Invalid(err.Error())
 	}
 
-	body, pluginError := requestBody(params)
+	body, pluginError := requestBody(params, uploads)
 	if pluginError != nil {
 		return nil, pluginError
 	}
@@ -147,9 +209,29 @@ func Send(ctx context.Context, params SendParams) (*SendResult, *apperr.Error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
-	request, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
+	bodyReader, err := body.open()
 	if err != nil {
+		return nil, apperr.Internal("Cannot build the request body")
+	}
+	if body.length == 0 {
+		// 自定义 reader 不会被 NewRequest 识别成 NoBody；长度 0 时显式换成
+		// http.NoBody，避免空正文退化成 chunked 传输。
+		_ = bodyReader.Close()
+		bodyReader = http.NoBody
+	}
+	request, err := http.NewRequestWithContext(ctx, method, target.String(), bodyReader)
+	if err != nil {
+		_ = bodyReader.Close()
 		return nil, apperr.Invalid("Cannot build the request: " + err.Error())
+	}
+	if body.length > 0 {
+		defer func() { _ = bodyReader.Close() }()
+	}
+	// body.open 是自定义 reader，http.NewRequest 推不出长度，必须显式设置，
+	// 否则会退化成 chunked 传输（部分服务端/网关不接受上传使用 chunked）。
+	request.ContentLength = body.length
+	if body.length > 0 {
+		request.GetBody = body.open
 	}
 
 	userAgentSet := false
@@ -175,6 +257,11 @@ func Send(ctx context.Context, params SendParams) (*SendResult, *apperr.Error) {
 	}
 	if !userAgentSet {
 		request.Header.Set("User-Agent", "DBX-API-Tester/"+Version())
+	}
+	// multipart 的 boundary 只有 sidecar 知道：用户手填的 Content-Type 一定对不上，直接覆盖。
+	if body.contentType != "" {
+		request.Header.Del("Content-Type")
+		request.Header.Set("Content-Type", body.contentType)
 	}
 
 	started := time.Now()
@@ -259,9 +346,21 @@ func parseTargetURL(raw string) (*url.URL, error) {
 	return parsed, nil
 }
 
-func requestBody(params SendParams) ([]byte, *apperr.Error) {
+// requestBody 生成请求正文；multipart 的 Content-Type 在 bodyPlan 里携带。
+func requestBody(params SendParams, uploads UploadResolver) (*bodyPlan, *apperr.Error) {
+	encoding := strings.ToLower(strings.TrimSpace(params.BodyEncoding))
+	if encoding == "multipart" {
+		if params.Multipart == nil {
+			return nil, apperr.Invalid("Multipart body is missing")
+		}
+		return buildMultipartBody(params.Multipart, uploads)
+	}
+	if params.Multipart != nil {
+		return nil, apperr.Invalid("Multipart body is only valid with the multipart body encoding")
+	}
+
 	var body []byte
-	switch strings.ToLower(strings.TrimSpace(params.BodyEncoding)) {
+	switch encoding {
 	case "", "none":
 		if params.BodyText != "" {
 			body = []byte(params.BodyText)
@@ -282,7 +381,183 @@ func requestBody(params SendParams) ([]byte, *apperr.Error) {
 	if len(body) > maxRequestBodyBytes {
 		return nil, apperr.Invalid(fmt.Sprintf("Request body is larger than %d bytes", maxRequestBodyBytes))
 	}
-	return body, nil
+	return &bodyPlan{
+		length: int64(len(body)),
+		open: func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(body)), nil
+		},
+	}, nil
+}
+
+// multipart 的规模限制。文件内容走暂存文件、流式发送，所以这里可以比内联
+// base64 宽松得多；上限与前端 model.js 的 MULTIPART_* 常量保持一致。
+const (
+	maxMultipartFiles            = 100
+	maxMultipartFileBytes  int64 = 1 << 30
+	maxMultipartTotalBytes int64 = 5 << 30
+)
+
+// multipartQuoteEscaper 与 mime/multipart 内部的转义规则一致：
+// 头参数里的反斜杠和双引号必须转义，否则文件名会截断 Content-Disposition。
+var multipartQuoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, `\"`)
+
+func multipartPartName(value string) (string, *apperr.Error) {
+	name := strings.TrimSpace(value)
+	if name == "" {
+		// 前端在字段名留空时会退回默认名；这里再兜一次，避免旧调用直接失败。
+		name = "file"
+	}
+	if strings.ContainsAny(name, "\r\n") {
+		return "", apperr.Invalid("Multipart part name contains an invalid character")
+	}
+	return name, nil
+}
+
+// multipartPart 是一个已校验的部件。staged 部件只记录 uploadId 与大小，
+// 正文在 open() 时才从暂存文件读出，避免把整个上传读进内存。
+type multipartPart struct {
+	disposition string
+	contentType string
+	data        []byte
+	uploadID    string
+	size        int64
+}
+
+// buildMultipartBody 组装 multipart 正文的元数据，并返回可按需重建的 bodyPlan。
+//
+// 长度自己算（而不是用 multipart.Writer + io.Pipe）：长度已知才能设置
+// Content-Length，避免上传请求退化成 chunked；GetBody 复用同一个 open，
+// 307/308 重定向时能重新打开暂存文件重发。
+func buildMultipartBody(multipartBody *MultipartBody, uploads UploadResolver) (*bodyPlan, *apperr.Error) {
+	if len(multipartBody.Files) > maxMultipartFiles {
+		return nil, apperr.Invalid(fmt.Sprintf("A multipart request supports at most %d files", maxMultipartFiles))
+	}
+
+	boundary := multipart.NewWriter(io.Discard).Boundary()
+	parts := make([]multipartPart, 0, len(multipartBody.Fields)+len(multipartBody.Files))
+	total := int64(0)
+
+	for _, field := range multipartBody.Fields {
+		name, nameError := multipartPartName(field.Name)
+		if nameError != nil {
+			return nil, nameError
+		}
+		disposition := fmt.Sprintf(`name="%s"`, multipartQuoteEscaper.Replace(name))
+		data := []byte(field.Value)
+		parts = append(parts, multipartPart{disposition: disposition, data: data})
+		total += int64(len(multipartPartHeader(boundary, disposition, "")) + len(data) + 2)
+	}
+
+	for _, file := range multipartBody.Files {
+		name, nameError := multipartPartName(file.Name)
+		if nameError != nil {
+			return nil, nameError
+		}
+		fileName := strings.TrimSpace(file.FileName)
+		if fileName == "" {
+			fileName = "file"
+		}
+		if strings.ContainsAny(fileName, "\r\n") {
+			return nil, apperr.Invalid("Multipart file name contains an invalid character")
+		}
+		contentType := strings.TrimSpace(file.ContentType)
+		if contentType == "" || !validHeaderValue(contentType) {
+			contentType = "application/octet-stream"
+		}
+		disposition := fmt.Sprintf(
+			`name="%s"; filename="%s"`,
+			multipartQuoteEscaper.Replace(name),
+			multipartQuoteEscaper.Replace(fileName),
+		)
+
+		part := multipartPart{disposition: disposition, contentType: contentType}
+		uploadID := strings.TrimSpace(file.UploadID)
+		switch {
+		case uploadID != "":
+			if uploads == nil {
+				return nil, apperr.Invalid("Uploaded files are not available")
+			}
+			size, sizeError := uploads.Stat(uploadID)
+			if sizeError != nil {
+				return nil, sizeError
+			}
+			part.uploadID = uploadID
+			part.size = size
+		case file.Base64 != "":
+			data, decodeError := base64.StdEncoding.DecodeString(file.Base64)
+			if decodeError != nil {
+				return nil, apperr.Invalid(fmt.Sprintf("File %q is not valid base64", fileName))
+			}
+			part.data = data
+			part.size = int64(len(data))
+		default:
+			return nil, apperr.Invalid(fmt.Sprintf("File %q has no content; choose it again", fileName))
+		}
+		if part.size > maxMultipartFileBytes {
+			return nil, apperr.Invalid(fmt.Sprintf("File %q is larger than %d bytes", fileName, maxMultipartFileBytes))
+		}
+		parts = append(parts, part)
+		total += int64(len(multipartPartHeader(boundary, disposition, contentType))) + part.size + 2
+	}
+
+	closing := []byte("--" + boundary + "--\r\n")
+	total += int64(len(closing))
+	if total > maxMultipartTotalBytes {
+		return nil, apperr.Invalid(fmt.Sprintf("Request body is larger than %d bytes", maxMultipartTotalBytes))
+	}
+
+	plan := &bodyPlan{
+		contentType: "multipart/form-data; boundary=" + boundary,
+		length:      total,
+	}
+	plan.open = func() (io.ReadCloser, error) {
+		readers := make([]io.Reader, 0, len(parts)*3+1)
+		closers := make([]io.Closer, 0, len(parts))
+		closeAll := func() {
+			for _, closer := range closers {
+				_ = closer.Close()
+			}
+		}
+		for _, part := range parts {
+			readers = append(readers, bytes.NewReader(multipartPartHeader(boundary, part.disposition, part.contentType)))
+			if part.uploadID != "" {
+				if uploads == nil {
+					closeAll()
+					return nil, apperr.Invalid("Uploaded files are not available")
+				}
+				file, openError := uploads.Open(part.uploadID)
+				if openError != nil {
+					closeAll()
+					return nil, openError
+				}
+				closers = append(closers, file)
+				readers = append(readers, file)
+			} else {
+				readers = append(readers, bytes.NewReader(part.data))
+			}
+			readers = append(readers, strings.NewReader("\r\n"))
+		}
+		readers = append(readers, bytes.NewReader(closing))
+		return &multiReadCloser{Reader: io.MultiReader(readers...), closers: closers}, nil
+	}
+	return plan, nil
+}
+
+// multipartPartHeader 生成与 mime/multipart 兼容的部件头（含前导 boundary 与空行）。
+func multipartPartHeader(boundary, disposition, contentType string) []byte {
+	var header strings.Builder
+	header.WriteString("--")
+	header.WriteString(boundary)
+	header.WriteString("\r\nContent-Disposition: form-data; ")
+	header.WriteString(disposition)
+	header.WriteString("\r\n")
+	if contentType != "" {
+		header.WriteString("Content-Type: ")
+		header.WriteString(contentType)
+		header.WriteString("\r\n")
+	}
+	header.WriteString("\r\n")
+	return []byte(header.String())
 }
 
 func statusText(response *http.Response) string {

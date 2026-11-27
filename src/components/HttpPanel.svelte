@@ -7,6 +7,7 @@
    */
   import SelectMenu from "./SelectMenu.svelte";
   import KVEditor from "./KVEditor.svelte";
+  import FormEditor from "./FormEditor.svelte";
   import CodeEditor from "./CodeEditor.svelte";
   import {
     HTTP_TIMEOUT_DEFAULT,
@@ -14,10 +15,9 @@
     BODY_TYPES,
     blankKV,
     clampNumber,
-    contentTypeForBody,
     buildRequestUrl,
   } from "../lib/model.js";
-  import { patchHttp, showToast } from "../lib/store.js";
+  import { addFormRow, patchHttp, showToast } from "../lib/store.js";
 
   /**
    * @type {{
@@ -41,8 +41,13 @@
     { value: "text", label: t("text") },
     { value: "xml", label: "XML" },
     { value: "form", label: t("form") },
+    { value: "multipart", label: t("multipart") },
   ]);
   const bodyType = $derived(BODY_TYPES.includes(http.bodyType) ? http.bodyType : "none");
+  // 占位提示跟着类型走：同一个编辑器在 JSON / 文本 / XML 下提示不一样。
+  const bodyPlaceholder = $derived(
+    bodyType === "json" ? t("bodyPlaceholderJson") : bodyType === "xml" ? t("bodyPlaceholderXml") : t("bodyPlaceholder"),
+  );
 
   function formatBody() {
     if (http.bodyType !== "json") return;
@@ -90,7 +95,11 @@
       <p class="hint">{t("headerHint")}</p>
     </div>
   {:else if tab === "body"}
-    <div class="tab-panel is-active tab-panel--fill">
+    <!-- 请求体编辑器都吃满剩余高度：代码编辑器整块滚动，表单在行列表内滚动。 -->
+    <div
+      class="tab-panel is-active"
+      class:tab-panel--fill={bodyType !== "none"}
+    >
       <div class="panel-row">
         <SelectMenu
           items={bodyTypeOptions}
@@ -99,22 +108,30 @@
           onchange={(value) => patchHttp({ bodyType: value })}
         />
         <span class="grow"></span>
-        <button class="btn btn-ghost btn-sm" type="button" disabled={bodyType === "none"} onclick={formatBody}>
-          {t("format")}
-        </button>
+        {#if bodyType === "form" || bodyType === "multipart"}
+          <button class="btn btn-ghost btn-sm" type="button" onclick={() => addFormRow("text")}>
+            {t("formAddRow")}
+          </button>
+        {/if}
+        {#if bodyType === "json"}
+          <button class="btn btn-ghost btn-sm" type="button" onclick={formatBody}>
+            {t("format")}
+          </button>
+        {/if}
       </div>
       {#if bodyType === "none"}
         <p class="hint">{t("none")}</p>
+      {:else if bodyType === "form" || bodyType === "multipart"}
+        <FormEditor {t} {http} />
       {:else}
         <CodeEditor
           value={http.bodyText}
-          placeholder={t("bodyPlaceholder")}
+          placeholder={bodyPlaceholder}
           ariaLabel={t("body")}
           json={bodyType === "json"}
           fill
           onchange={(value) => patchHttp({ bodyText: value })}
         />
-        <p class="hint">{t("contentTypeHint", { type: contentTypeForBody(bodyType) })}</p>
       {/if}
     </div>
   {:else}

@@ -153,6 +153,98 @@ export async function pickProtoFiles(options = {}) {
   return results;
 }
 
+/** 把二进制分块拼成 base64；分块拼接避免 apply 参数过多导致栈溢出。 */
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+/**
+ * 上传源：把「宿主文件句柄」和「浏览器 File」抹平成同一套分块读取接口。
+ *
+ * store 拿到源之后按 MULTIPART_UPLOAD_CHUNK 逐块读出，再经 RPC 写进 sidecar
+ * 暂存文件；这样文件内容不会整份留在 JS 内存里，也不再受单条 JSON-RPC 体积上限
+ * 约束。调用方用完必须调用 close()，让宿主释放句柄。
+ *
+ * @typedef {{
+ *   fileName: string,
+ *   size: number,
+ *   contentType: string,
+ *   readChunk: (offset: number, length: number) => Promise<{ dataBase64: string, eof: boolean, length: number }>,
+ *   close: () => Promise<void>,
+ * }} UploadSource
+ */
+
+/** 包装宿主 fileTransfer 返回的句柄。 */
+function hostUploadSource(transfer, handle) {
+  const fileName = String(handle.name || "upload.bin");
+  const size = Math.max(0, Number(handle.size) || 0);
+  let closed = false;
+  return {
+    fileName,
+    size,
+    contentType: typeof handle.contentType === "string" ? handle.contentType : "",
+    async readChunk(offset, length) {
+      const chunk = await transfer.read(handle.handleId, offset, length);
+      if (!chunk || typeof chunk.dataBase64 !== "string") throw fileError("read");
+      const bytes = Number(chunk.length) || decodeBase64(chunk.dataBase64).length;
+      return { dataBase64: chunk.dataBase64, eof: Boolean(chunk.eof), length: bytes };
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      try {
+        await transfer.cancel?.(handle.handleId);
+      } catch {
+        // 句柄关闭失败不影响已经暂存的内容。
+      }
+    },
+  };
+}
+
+/**
+ * 用宿主文件传输选择要上传的文件，返回分块上传源。
+ *
+ * 返回 null 表示宿主没有 fileTransfer（调用方应退回浏览器文件选择器）；
+ * 返回空数组表示用户取消了选择。
+ * @returns {Promise<UploadSource[] | null>}
+ */
+export async function pickUploadSources(options = {}) {
+  const transfer = plugin?.fileTransfer;
+  if (!transfer || typeof transfer.pick !== "function") return null;
+
+  const selection = await transfer.pick({ multiple: options.multiple !== false });
+  const handles = Array.isArray(selection?.files) ? selection.files : [];
+  return handles.map((handle) => hostUploadSource(transfer, handle));
+}
+
+/**
+ * 把浏览器 `<input type="file">` 选中的 File 包装成上传源（宿主没有 fileTransfer 时的兜底）。
+ * @param {File} file
+ * @returns {UploadSource}
+ */
+export function browserUploadSource(file) {
+  const fileName = String(file?.name || "upload.bin");
+  const size = Math.max(0, Number(file?.size) || 0);
+  return {
+    fileName,
+    size,
+    contentType: String(file?.type || ""),
+    async readChunk(offset, length) {
+      const start = Math.max(0, offset);
+      if (start >= size) return { dataBase64: "", eof: true, length: 0 };
+      const end = Math.min(size, start + length);
+      const bytes = new Uint8Array(await file.slice(start, end).arrayBuffer());
+      return { dataBase64: bytesToBase64(bytes), eof: end >= size, length: bytes.length };
+    },
+    async close() {},
+  };
+}
+
 /**
  * 监听桌面端系统拖放。返回取消订阅函数；宿主不支持时返回 null。
  *

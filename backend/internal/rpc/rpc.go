@@ -16,12 +16,16 @@ import (
 	"github.com/jlian/dbx-plugin-api-tester/internal/grpctool"
 	"github.com/jlian/dbx-plugin-api-tester/internal/httptool"
 	"github.com/jlian/dbx-plugin-api-tester/internal/inflight"
+	"github.com/jlian/dbx-plugin-api-tester/internal/uploads"
 )
 
 // 全部对外方法名。前端 src/lib/store.js 里 invoke 的第一个参数与之对应。
 const (
 	MethodPing          = "api/ping"
 	MethodHTTPSend      = "http/send"
+	MethodUploadBegin   = "http/upload/begin"
+	MethodUploadChunk   = "http/upload/chunk"
+	MethodUploadAbort   = "http/upload/abort"
 	MethodRequestCancel = "request/cancel"
 	MethodGRPCServices  = "grpc/services"
 	MethodGRPCMethods   = "grpc/methods"
@@ -38,6 +42,9 @@ const (
 func Methods() []string {
 	return []string{
 		MethodHTTPSend,
+		MethodUploadBegin,
+		MethodUploadChunk,
+		MethodUploadAbort,
 		MethodRequestCancel,
 		MethodGRPCServices,
 		MethodGRPCMethods,
@@ -61,15 +68,30 @@ type PingResult struct {
 // 编译期确认各处理器的错误类型与分发层一致。
 // 若某个包改了返回类型，这里会直接编译失败，而不是等到运行时才暴露。
 var (
-	_ func(context.Context, httptool.SendParams) (*httptool.SendResult, *apperr.Error) = httptool.Send
-	_ func(context.Context, grpctool.DiscoveryParams) (any, *apperr.Error)             = grpctool.Discover
-	_ func(context.Context, grpctool.MethodsParams) (any, *apperr.Error)               = grpctool.DescribeMethods
-	_ func(context.Context, grpctool.InvokeParams) (any, *apperr.Error)                = grpctool.Invoke
+	_ func(context.Context, httptool.SendParams, httptool.UploadResolver) (*httptool.SendResult, *apperr.Error) = httptool.SendWithUploads
+	_ func(context.Context, grpctool.DiscoveryParams) (any, *apperr.Error)                                      = grpctool.Discover
+	_ func(context.Context, grpctool.MethodsParams) (any, *apperr.Error)                                        = grpctool.DescribeMethods
+	_ func(context.Context, grpctool.InvokeParams) (any, *apperr.Error)                                         = grpctool.Invoke
 )
 
 // CancelResult 是 request/cancel 的返回结构。
 type CancelResult struct {
 	Canceled bool `json:"canceled"`
+}
+
+// UploadBeginResult 返回后续分块使用的 uploadId。
+type UploadBeginResult struct {
+	UploadID string `json:"uploadId"`
+}
+
+// UploadChunkResult 返回文件当前累计字节数，前端据此显示进度。
+type UploadChunkResult struct {
+	Size int64 `json:"size"`
+}
+
+// UploadAbortResult 表示暂存文件是否被删除。
+type UploadAbortResult struct {
+	Aborted bool `json:"aborted"`
 }
 
 // Handler 持有分发所需的依赖。
@@ -78,6 +100,7 @@ type Handler struct {
 	version  string
 	inflight *inflight.Registry
 	streams  *grpctool.StreamManager
+	uploads  *uploads.Store
 }
 
 // New 构造分发器。id 与 version 必须与 manifest.json 一致，
@@ -88,6 +111,7 @@ func New(id, version string) *Handler {
 		version:  version,
 		inflight: inflight.New(),
 		streams:  grpctool.NewStreamManager(),
+		uploads:  uploads.NewStore(),
 	}
 }
 
@@ -95,6 +119,9 @@ func New(id, version string) *Handler {
 func (h *Handler) Close() {
 	if h.streams != nil {
 		h.streams.CloseAll()
+	}
+	if h.uploads != nil {
+		h.uploads.Close()
 	}
 }
 
@@ -117,7 +144,44 @@ func (h *Handler) Dispatch(method string, params json.RawMessage) (any, *apperr.
 			return nil, failure
 		}
 		defer release()
-		return httptool.Send(ctx, request.SendParams)
+		return httptool.SendWithUploads(ctx, request.SendParams, h.uploads)
+
+	case MethodUploadBegin:
+		var request struct {
+			FileName string `json:"fileName"`
+			Size     int64  `json:"size"`
+		}
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		uploadID, failure := h.uploads.Begin(request.FileName, request.Size)
+		if failure != nil {
+			return nil, failure
+		}
+		return &UploadBeginResult{UploadID: uploadID}, nil
+
+	case MethodUploadChunk:
+		var request struct {
+			UploadID   string `json:"uploadId"`
+			DataBase64 string `json:"dataBase64"`
+		}
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		size, failure := h.uploads.Append(request.UploadID, request.DataBase64)
+		if failure != nil {
+			return nil, failure
+		}
+		return &UploadChunkResult{Size: size}, nil
+
+	case MethodUploadAbort:
+		var request struct {
+			UploadID string `json:"uploadId"`
+		}
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		return &UploadAbortResult{Aborted: h.uploads.Abort(request.UploadID)}, nil
 
 	case MethodRequestCancel:
 		var request struct {
