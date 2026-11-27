@@ -121,7 +121,9 @@ export const BODY_TYPES = [
     group: "bodyGroupRaw",
     icon: "M4.6 3.2 2.2 6l2.4 2.8M7.4 3.2 9.8 6 7.4 8.8",
     editor: "raw",
-    contentType: "text/plain",
+    // 不带 charset 时部分服务端按 US-ASCII 解释，中文会乱码；JSON 规范默认 UTF-8，
+    // 不加 charset 才是主流写法，所以只有纯文本类型显式声明。
+    contentType: "text/plain; charset=utf-8",
     custom: true,
   },
   {

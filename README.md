@@ -6,7 +6,8 @@
 
 **HTTP**
 - 常用方法、完整 URL、查询参数表格（自动编码并合并进 URL）
-- 请求头编辑，JSON / 文本 / XML / 表单请求体：JSON 高亮与格式化
+- 请求头编辑，JSON / 文本 / XML / 表单请求体：JSON 高亮与格式化；文本类型默认带
+  `charset=utf-8`，避免中文被服务端按 US-ASCII 解释
 - 请求体类型里的 `Form` 与 `Multipart Form` 是两种独立类型，共用一套「文本 / 文件」混排行编辑；
   前者按 `application/x-www-form-urlencoded` 编码，后者（`multipart/form-data`）的 boundary 与
   `Content-Type` 由 sidecar 生成。
