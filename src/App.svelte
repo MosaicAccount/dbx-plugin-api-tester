@@ -619,6 +619,7 @@
             http={$appState.http}
             sending={$appState.sending}
             canceling={$appState.canceling}
+            download={$appState.download}
           />
         {:else}
           <GrpcRequestHead
@@ -636,7 +637,12 @@
       <div class="workspace" class:is-resizing={resizingSplit} bind:this={workspace} style:--split={$layoutStore.split}>
         <section class="editor">
           {#if $appState.protocol === "http"}
-            <HttpPanel {t} http={$appState.http} defaultTimeout={$appState.settings.httpTimeoutMs} />
+            <HttpPanel
+              {t}
+              http={$appState.http}
+              defaultTimeout={$appState.settings.httpTimeoutMs}
+              bodyIssue={$appState.bodyIssue}
+            />
           {:else}
             <GrpcPanel
               {t}
@@ -673,6 +679,8 @@
           protocol={$appState.protocol}
           stream={$appState.stream}
           canceling={$appState.canceling}
+          download={$appState.download}
+          canDownload={host.canSaveFiles()}
         />
       </div>
     </main>

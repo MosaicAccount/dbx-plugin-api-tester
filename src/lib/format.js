@@ -99,6 +99,26 @@ export function prettyJSON(text) {
 }
 
 /**
+ * 二进制正文的预览长度，单位是 base64 字符数。
+ *
+ * 响应体上限是 3 MB，base64 之后是 4 MB 的一整块文本：直接塞进 `<pre>` 会让浏览器
+ * 排版和滚动都变慢。二进制本来也只能看个文件头和字节序列，512 个 base64 字符（约
+ * 384 字节、六七行）足够确认"这是不是一个 zip / png"，剩下的交给下载按钮。
+ */
+export const BINARY_PREVIEW_CHARS = 512;
+
+/**
+ * 截出二进制正文的预览片段。
+ *
+ * @returns {{ text: string, truncated: boolean }}
+ */
+export function binaryPreview(base64) {
+  const text = String(base64 === undefined || base64 === null ? "" : base64);
+  if (text.length <= BINARY_PREVIEW_CHARS) return { text, truncated: false };
+  return { text: text.slice(0, BINARY_PREVIEW_CHARS), truncated: true };
+}
+
+/**
  * 响应体渲染决策。
  *
  * 抽成纯函数是为了让"该按 JSON 渲染还是原样显示"这一判断可被测试，
@@ -107,7 +127,7 @@ export function prettyJSON(text) {
  */
 export function presentBody(data) {
   if (data?.bodyKind === "binary") {
-    return { variant: "code", text: data.bodyBase64 || "", json: false };
+    return { variant: "code", text: binaryPreview(data.bodyBase64).text, json: false };
   }
   if (data?.bodyKind === "empty" || !data?.bodyText) {
     return { variant: "empty", text: "", json: false };

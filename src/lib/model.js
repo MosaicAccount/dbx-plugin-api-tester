@@ -24,6 +24,21 @@ export const PROTO_TOTAL_LIMIT = 160 * 1024;
 export const PROTO_FILE_COUNT_LIMIT = 64;
 
 /**
+ * multipart 上传的限制。
+ *
+ * 文件不再塞进单个 JSON-RPC 消息：按 MULTIPART_UPLOAD_CHUNK 分块交给 sidecar
+ * 暂存到临时文件，发送时流式拼成正文。因此上限只是"别把用户磁盘写满"的保守值，
+ * 不是技术上限，与 BRIDGE_BODY_LIMIT 无关。后端 internal/uploads 与 httptool
+ * 里有同样的值；要支持更大的单文件，改这三处常量即可。
+ */
+export const MULTIPART_FILE_LIMIT = 1 * 1024 * 1024 * 1024;
+export const MULTIPART_TOTAL_LIMIT = 5 * 1024 * 1024 * 1024;
+export const MULTIPART_FILE_COUNT_LIMIT = 100;
+export const MULTIPART_UPLOAD_CHUNK = 512 * 1024;
+/** 文件行字段名留空时使用的默认 part 名（绝不拿文件名顶替用户填的字段名）。 */
+export const MULTIPART_DEFAULT_PART_NAME = "file";
+
+/**
  * 交互式会话（客户端流 / 双向流）的时限。
  *
  * 默认值与后端 stream_session.go 保持一致；后端还会再校验一次，
@@ -39,19 +54,110 @@ export const STREAM_DURATION_DEFAULT = 1800000;
 export const STREAM_DURATION_MIN = 60000;
 export const STREAM_DURATION_MAX = 7200000;
 
+/**
+ * 把响应体流式保存到本地文件时的限额。
+ *
+ * 大小未知，所以走"边收边写"：每次从 sidecar 读一块、写一块，内存里只留一块。
+ * 读块大小以宿主 beginSave 返回的 chunkBytes 为准，缺省用 DOWNLOAD_CHUNK_DEFAULT。
+ */
+export const DOWNLOAD_CHUNK_DEFAULT = 256 * 1024;
+/** 单次 read 的等待上限；到点没有新数据后端会作废会话并返回 timeout。 */
+export const DOWNLOAD_READ_TIMEOUT_MS = 30000;
+/** 宿主没给出文件名时保存对话框用的兜底名。 */
+export const DOWNLOAD_FALLBACK_NAME = "download.bin";
+
 export const IS_MAC =
   typeof navigator === "undefined" ? false : /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
 export const SAVE_SHORTCUT = IS_MAC ? "⌘S" : "Ctrl+S";
 export const SAVE_AS_SHORTCUT = IS_MAC ? "⇧⌘S" : "Ctrl+Shift+S";
 
-export const BODY_CONTENT_TYPES = {
-  json: "application/json",
-  text: "text/plain",
-  xml: "application/xml",
-  form: "application/x-www-form-urlencoded",
-};
+/**
+ * 请求体类型注册表：类型、下拉文案、编辑器种类、默认 Content-Type、能否自定义
+ * 都只有这一份定义。
+ *
+ * 以前这四件事分散在类型数组、Content-Type 映射、面板 if/else、序列化分支里，
+ * 加类型时漏掉任何一处就会出现「下拉有选项、界面没变化」——#11 就是这么来的。
+ * 新类型只需在数组里加一项，下拉、编辑器、Content-Type、序列化都会跟着走。
+ *
+ * editor 的取值决定用哪个编辑器与哪种序列化：
+ * - `none`     不发送正文
+ * - `raw`      JSON / 文本 / XML 共用的代码编辑器，正文来自 bodyText
+ * - `kv`       键值行编辑器，按 application/x-www-form-urlencoded 编码
+ * - `multipart` 文本字段 + 文件行，boundary 与 Content-Type 由 sidecar 生成
+ */
+export const BODY_TYPES = [
+  {
+    id: "form",
+    labelKey: "form",
+    group: "bodyGroupForm",
+    icon: "M2.5 2.4h7v7.2h-7zM4.5 5h3M4.5 7h2",
+    editor: "kv",
+    contentType: "application/x-www-form-urlencoded",
+    custom: true,
+  },
+  {
+    id: "multipart",
+    labelKey: "multipart",
+    group: "bodyGroupForm",
+    icon: "M2.5 2.4h7v7.2h-7zM4.5 5h3M4.5 7h2",
+    editor: "multipart",
+    // boundary 必须由 sidecar 生成，界面不给自定义入口。
+    contentType: "",
+    custom: false,
+    generated: true,
+  },
+  {
+    id: "json",
+    label: "JSON",
+    group: "bodyGroupRaw",
+    icon: "M4.6 3.2 2.2 6l2.4 2.8M7.4 3.2 9.8 6 7.4 8.8",
+    editor: "raw",
+    contentType: "application/json",
+    custom: true,
+  },
+  {
+    id: "text",
+    labelKey: "text",
+    group: "bodyGroupRaw",
+    icon: "M4.6 3.2 2.2 6l2.4 2.8M7.4 3.2 9.8 6 7.4 8.8",
+    editor: "raw",
+    // 不带 charset 时部分服务端按 US-ASCII 解释，中文会乱码；JSON 规范默认 UTF-8，
+    // 不加 charset 才是主流写法，所以只有纯文本类型显式声明。
+    contentType: "text/plain; charset=utf-8",
+    custom: true,
+  },
+  {
+    id: "xml",
+    label: "XML",
+    group: "bodyGroupRaw",
+    icon: "M4.6 3.2 2.2 6l2.4 2.8M7.4 3.2 9.8 6 7.4 8.8",
+    editor: "raw",
+    contentType: "application/xml",
+    custom: true,
+  },
+  {
+    id: "none",
+    labelKey: "bodyNone",
+    group: "bodyGroupOther",
+    icon: "M2.8 2.8h2.2v2.2h-2.2zM7 2.8h2.2v2.2h-2.2zM2.8 7h2.2v2.2h-2.2zM7 7h2.2v2.2h-2.2z",
+    editor: "none",
+    contentType: "",
+    custom: false,
+  },
+];
 
-export const BODY_TYPES = ["none", "json", "text", "xml", "form"];
+/** 合法类型 id，按注册表顺序（也是下拉顺序）。 */
+export const BODY_TYPE_IDS = BODY_TYPES.map((type) => type.id);
+
+/** 取类型定义；未知值统一回退到「不发送正文」，调用方不必各自兜底。 */
+export function bodyTypeSpec(id) {
+  return BODY_TYPES.find((type) => type.id === id) || BODY_TYPES[BODY_TYPES.length - 1];
+}
+
+/** 把任意输入收敛成合法类型 id。 */
+export function normalizeBodyType(id) {
+  return BODY_TYPE_IDS.includes(id) ? id : "none";
+}
 export const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 export const PROTOCOLS = ["http", "grpc"];
 
@@ -68,6 +174,10 @@ export function defaultHttp(settings) {
     headers: [blankKV()],
     bodyType: "none",
     bodyText: "",
+    // 表单行由 Form 与 Multipart Form 共用：文本行发普通字段，文件行可以挂
+    // 多个文件（同一个字段名生成多个 part）。文件内容暂存在 sidecar，快照只带
+    // 文件名 / 类型 / 大小，重新打开后需要重新选择。
+    formRows: [],
     timeoutMs: clampNumber(settings?.httpTimeoutMs, HTTP_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX),
     followRedirects: true,
     skipTlsVerify: false,
@@ -146,6 +256,179 @@ export function normalizeKV(value) {
       enabled: item.enabled !== false,
     }));
   return rows.length ? rows : [blankKV()];
+}
+
+/**
+ * 新建一行表单部件；文本字段与文件部件共用一个列表，靠 kind 区分。
+ * @returns {{ kind: "text" | "file", name: string, value: string, files: Array<object>, enabled: boolean }}
+ */
+export function blankFormRow(kind = "text") {
+  return {
+    kind: kind === "file" ? "file" : "text",
+    name: "",
+    value: "",
+    files: [],
+    enabled: true,
+  };
+}
+
+/**
+ * 归一化表单行。
+ *
+ * 只保留有内容可发的行（文本行要有字段名或值，文件行至少挂一个文件）；文件内容与
+ * 暂存 id 都不进快照，恢复后 files 里没有 uploadId，UI 据此提示重新选择。
+ * 旧快照里的单文件字段（fileName / size / contentBase64）会迁移成 files[0]。
+ */
+export function normalizeFormRows(value) {
+  if (!Array.isArray(value)) return [];
+  const rows = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const kind = item.kind === "file" ? "file" : "text";
+    const name = item.name === undefined || item.name === null ? "" : String(item.name);
+    const enabled = item.enabled !== false;
+    if (kind === "file") {
+      const files = normalizeFormFiles(item);
+      if (!files.length) continue;
+      rows.push({ kind, name, value: "", files, enabled });
+      continue;
+    }
+    const value = item.value === undefined || item.value === null ? "" : String(item.value);
+    if (!name.trim() && !value) continue;
+    rows.push({ kind, name, value, files: [], enabled });
+  }
+  return rows;
+}
+
+/** 归一化一行里的文件列表；兼容合并前的单文件行。 */
+export function normalizeFormFiles(item) {
+  const raw = Array.isArray(item.files)
+    ? item.files
+    : item.fileName
+      ? [{ fileName: item.fileName, contentType: item.contentType, size: item.size }]
+      : [];
+  const files = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const fileName = String(entry.fileName || "").trim();
+    if (!fileName) continue;
+    const size = Number(entry.size);
+    files.push({
+      id: typeof entry.id === "string" && entry.id ? entry.id : uid(),
+      fileName,
+      contentType: typeof entry.contentType === "string" ? entry.contentType : "",
+      size: Number.isFinite(size) && size > 0 ? Math.round(size) : 0,
+      // 暂存 id 只属于当前运行期；快照里不写，恢复后自然为空。
+      uploadId: "",
+      status: "missing",
+      progress: 0,
+    });
+  }
+  return files;
+}
+
+/** 启用的文件行里挂着的文件，按行展开。 */
+export function formFileEntries(rows) {
+  const entries = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || row.enabled === false || row.kind !== "file") continue;
+    for (const file of Array.isArray(row.files) ? row.files : []) entries.push({ row, file });
+  }
+  return entries;
+}
+
+export function formFileCount(rows) {
+  return formFileEntries(rows).length;
+}
+
+/** 文件原始字节合计，用来和 MULTIPART_TOTAL_LIMIT 比较（文本行不占额度）。 */
+export function multipartTotalBytes(rows) {
+  return formFileEntries(rows).reduce((sum, entry) => sum + (Number(entry.file.size) || 0), 0);
+}
+
+/** 选择文件后先做配额预检，避免把 60 MB 传进 sidecar 才被拒绝。 */
+export function planFormFiles(rows, items, options = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const replaceRow = Number.isInteger(options.rowIndex) ? list[options.rowIndex] : null;
+  const replaced =
+    options.fileId && replaceRow?.kind === "file"
+      ? (replaceRow.files || []).find((file) => file.id === options.fileId)
+      : null;
+  let total = multipartTotalBytes(list) - (Number(replaced?.size) || 0);
+  let count = formFileCount(list) - (replaced ? 1 : 0);
+
+  const accepted = [];
+  const rejected = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    const size = Number(item.size) || 0;
+    if (item.error === "size" || item.error === "read") {
+      rejected.push({ fileName: item.fileName, reason: item.error, source: item });
+      continue;
+    }
+    if (size > MULTIPART_FILE_LIMIT) {
+      rejected.push({
+        fileName: item.fileName,
+        reason: "size",
+        size,
+        limit: MULTIPART_FILE_LIMIT,
+        source: item,
+      });
+      continue;
+    }
+    if (count >= MULTIPART_FILE_COUNT_LIMIT) {
+      rejected.push({
+        fileName: item.fileName,
+        reason: "count",
+        current: count,
+        limit: MULTIPART_FILE_COUNT_LIMIT,
+        source: item,
+      });
+      continue;
+    }
+    if (total + size > MULTIPART_TOTAL_LIMIT) {
+      rejected.push({
+        fileName: item.fileName,
+        reason: "total",
+        size,
+        total: total + size,
+        limit: MULTIPART_TOTAL_LIMIT,
+        source: item,
+      });
+      continue;
+    }
+    total += size;
+    count += 1;
+    accepted.push(item);
+  }
+  return { accepted, rejected };
+}
+
+/** 常见扩展名到 Content-Type；识别不出时按二进制流处理。 */
+const MULTIPART_CONTENT_TYPES = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  pdf: "application/pdf",
+  json: "application/json",
+  xml: "application/xml",
+  txt: "text/plain",
+  csv: "text/csv",
+  zip: "application/zip",
+  gz: "application/gzip",
+  tar: "application/x-tar",
+  mp4: "video/mp4",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+};
+
+export function guessContentType(fileName) {
+  const name = String(fileName || "");
+  const dot = name.lastIndexOf(".");
+  const extension = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
+  return MULTIPART_CONTENT_TYPES[extension] || "application/octet-stream";
 }
 
 /**
@@ -323,8 +606,9 @@ export function collectFolders(folderIndex, savedIndex) {
   return [...folders].sort((a, b) => a.localeCompare(b));
 }
 
+/** 某个类型的默认 Content-Type（multipart 与 none 为空串）。 */
 export function contentTypeForBody(bodyType) {
-  return BODY_CONTENT_TYPES[bodyType] || "";
+  return bodyTypeSpec(normalizeBodyType(bodyType)).contentType;
 }
 
 /**
@@ -351,8 +635,143 @@ export function buildRequestUrl(rawUrl, params) {
   return parsed.toString();
 }
 
-/** 拼出发送用的请求头，并按请求体类型补 Content-Type。 */
-export function buildHeaders(headers, bodyType) {
+/**
+ * 把表单键值行拼成 application/x-www-form-urlencoded 正文。
+ *
+ * 用 URLSearchParams 而不是手写 `encodeURIComponent`：空格要编码成 `+`，
+ * 且和浏览器 / curl 的 `--data-urlencode` 行为一致。
+ */
+export function buildFormBody(rows) {
+  const params = new URLSearchParams();
+  for (const row of rows || []) {
+    if (row.enabled === false) continue;
+    const name = String(row.name || "").trim();
+    if (!name) continue;
+    params.append(name, row.value === undefined || row.value === null ? "" : String(row.value));
+  }
+  return params.toString();
+}
+
+/** 把旧快照里的 urlencoded 正文解析成键值行；解析不出内容时返回空数组。 */
+export function parseFormBody(text) {
+  const raw = typeof text === "string" ? text.trim() : "";
+  if (!raw) return [];
+  const rows = [];
+  for (const pair of raw.split("&")) {
+    if (!pair) continue;
+    const separator = pair.indexOf("=");
+    const rawName = separator < 0 ? pair : pair.slice(0, separator);
+    const rawValue = separator < 0 ? "" : pair.slice(separator + 1);
+    rows.push({ name: decodeFormComponent(rawName), value: decodeFormComponent(rawValue), enabled: true });
+  }
+  return rows;
+}
+
+/** 解码单个 urlencoded 片段；非法转义保留原文，避免整条正文被丢掉。 */
+function decodeFormComponent(value) {
+  const text = String(value || "").replace(/\+/g, " ");
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * 请求头里应该补的 Content-Type。
+ *
+ * multipart 的 boundary 只有 sidecar 知道，这里返回空串、由后端设置；
+ * 其余类型取注册表里的默认值，none 没有正文也就没有 Content-Type。
+ */
+export function httpContentType(http) {
+  const spec = bodyTypeSpec(normalizeBodyType(http?.bodyType));
+  return spec.generated ? "" : spec.contentType;
+}
+
+/**
+ * 把表单行拆成 sidecar 需要的文本字段与文件部件。
+ *
+ * 文件只传 uploadId（内容已经分块暂存在 sidecar），字段名留空时统一用 "file"，
+ * 不会把文件名当成字段名，也不会覆盖用户填过的值。
+ */
+export function multipartPayload(rows) {
+  const fields = [];
+  const files = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || row.enabled === false) continue;
+    const name = String(row.name || "").trim();
+    if (row.kind === "file") {
+      for (const file of Array.isArray(row.files) ? row.files : []) {
+        if (!file?.uploadId) continue;
+        files.push({
+          name: name || MULTIPART_DEFAULT_PART_NAME,
+          fileName: file.fileName || "file",
+          contentType: file.contentType || guessContentType(file.fileName),
+          uploadId: file.uploadId,
+        });
+      }
+      continue;
+    }
+    if (name) fields.push({ name, value: row.value === undefined || row.value === null ? "" : String(row.value) });
+  }
+  return { fields, files };
+}
+
+/**
+ * 组装 HTTP 正文参数。
+ *
+ * 纯函数：表单按内容自动选择编码——有文件（或勾了强制 multipart）时只把字段与文件
+ * 交给 sidecar，由后端生成 boundary 与 Content-Type；否则在这里拼 urlencoded 正文。
+ * 发送前的体积校验留在 store。
+ */
+export function buildBodyParams(http) {
+  const spec = bodyTypeSpec(normalizeBodyType(http?.bodyType));
+  if (spec.editor === "multipart") {
+    return { bodyEncoding: "multipart", bodyText: "", multipart: multipartPayload(http.formRows || []) };
+  }
+  if (spec.editor === "kv") {
+    const rows = (Array.isArray(http.formRows) ? http.formRows : []).filter((row) => row.kind !== "file");
+    return { bodyEncoding: "text", bodyText: buildFormBody(rows) };
+  }
+  return {
+    bodyEncoding: spec.editor === "none" ? "none" : "text",
+    bodyText: spec.editor === "none" ? "" : http.bodyText,
+  };
+}
+
+/**
+ * 校验 JSON 正文，返回带行列的错误；没有问题或正文为空时返回 null。
+ *
+ * 发送前拦截用的是和「格式化」同一个 JSON.parse。错误位置优先取 V8 消息里现成的
+ * `line N column M`，退一步再用 `position N` 自己换算；都取不到时 line/column 为 0，
+ * 界面只显示消息。
+ */
+export function jsonIssue(text) {
+  const raw = typeof text === "string" ? text : "";
+  if (!raw.trim()) return null;
+  try {
+    JSON.parse(raw);
+    return null;
+  } catch (error) {
+    const message = String(error?.message || "Invalid JSON");
+    const lineColumn = /line (\d+) column (\d+)/i.exec(message);
+    if (lineColumn) return { message, line: Number(lineColumn[1]), column: Number(lineColumn[2]) };
+    const position = /position (\d+)/i.exec(message);
+    if (position) {
+      const offset = Number(position[1]);
+      const before = raw.slice(0, offset);
+      return {
+        message,
+        line: before.split("\n").length,
+        column: offset - before.lastIndexOf("\n"),
+      };
+    }
+    return { message, line: 0, column: 0 };
+  }
+}
+
+/** 拼出发送用的请求头，并在用户没填 Content-Type 时补上推断出的值。 */
+export function buildHeaders(headers, contentType) {
   const result = [];
   for (const row of headers || []) {
     if (row.enabled === false) continue;
@@ -360,7 +779,6 @@ export function buildHeaders(headers, bodyType) {
     if (!name) continue;
     result.push({ name, value: row.value });
   }
-  const contentType = contentTypeForBody(bodyType);
   if (contentType && !result.some((header) => header.name.toLowerCase() === "content-type")) {
     result.push({ name: "Content-Type", value: contentType });
   }
@@ -391,8 +809,10 @@ export function truncate(text, limit) {
 export function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  if (bytes < 1024 * 1024) return `${Number((bytes / 1024).toFixed(1))} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${Number((bytes / (1024 * 1024)).toFixed(2))} MB`;
+  // GB 去掉多余的 .00：5 GB 比 5.00 GB 好读。
+  return `${Number((bytes / (1024 * 1024 * 1024)).toFixed(2))} GB`;
 }
 
 export function uid() {
@@ -408,6 +828,88 @@ export function statusTone(value) {
   return "ok";
 }
 
+/** 大小写不敏感地取一个响应头的值；取不到时返回空串。 */
+export function headerValue(headers, name) {
+  if (!Array.isArray(headers)) return "";
+  const wanted = String(name || "").toLowerCase();
+  for (const entry of headers) {
+    if (String(entry?.name || "").toLowerCase() === wanted) return String(entry?.value || "");
+  }
+  return "";
+}
+
+/** Content-Disposition 是否是「附件」：只有 attachment 才表示服务器在给文件。 */
+export function isAttachmentDisposition(value) {
+  return /^\s*attachment\b/i.test(String(value || ""));
+}
+
+/** 文件名只留最后一段，避免把 `../` 或 Windows 路径画到界面上。 */
+function displayFileName(value) {
+  return String(value || "")
+    .trim()
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .pop() || "";
+}
+
+/**
+ * 从 Content-Disposition 里取文件名，只用于界面展示。
+ *
+ * 优先 RFC 5987 的 `filename*`（带字符集和百分号编码），退回普通 `filename`；
+ * 解析不出来就返回空串，由调用方回落到 URL。
+ */
+export function dispositionFileName(value) {
+  const header = String(value || "");
+  if (!header) return "";
+  const encoded = /filename\*\s*=\s*([^;]+)/i.exec(header);
+  if (encoded) {
+    const raw = encoded[1].trim().replace(/^["']|["']$/g, "");
+    const parts = raw.split("'");
+    const payload = parts.length >= 3 ? parts.slice(2).join("'") : raw;
+    try {
+      return displayFileName(decodeURIComponent(payload));
+    } catch {
+      return displayFileName(payload);
+    }
+  }
+  const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(header);
+  if (!plain) return "";
+  return displayFileName(plain[1] ?? plain[2] ?? "");
+}
+
+/**
+ * 这次响应是不是一份文件。
+ *
+ * 判断只看响应本身：正文被判定为二进制，或服务器用 Content-Disposition: attachment
+ * 明确声明了附件。文本接口（JSON / HTML / 纯文本）不给下载入口——普通调试顺手把响应
+ * 存成文件，比「想下载时找不到按钮」更容易让人误会。
+ *
+ * 所以下载入口是「拿到响应之后」才出现的：请求发出前无从判断对方要返回什么。
+ */
+export function isDownloadResponse(response) {
+  if (!response || response.kind !== "done" || response.protocol !== "http") return false;
+  const data = response.data;
+  if (!data) return false;
+  if (data.bodyKind === "binary") return true;
+  return isAttachmentDisposition(headerValue(data.headers, "content-disposition"));
+}
+
+/**
+ * 文件响应的完整大小（字节）；判断不出来时返回 0。
+ *
+ * 优先读 `Content-Length`：正文可能在展示上限（3 MB）处被截断，`sizeBytes` 只是"读进
+ * 内存的长度"，而 `Content-Length` 是这次响应的真实总字节数——下载保存的就是这么多。
+ * 响应头里没有（chunked）时退回 `sizeBytes`，但只在正文没被截断时才可信：截断后它的
+ * 值是把上限，报出来会让人以为文件就这么大。
+ */
+export function responseFileSizeBytes(data) {
+  const declared = Number(headerValue(data?.headers, "content-length"));
+  if (Number.isFinite(declared) && declared > 0) return declared;
+  if (data?.truncated) return 0;
+  const received = Number(data?.sizeBytes);
+  return Number.isFinite(received) && received > 0 ? received : 0;
+}
+
 /**
  * 把一份快照叠加到当前请求状态上。
  *
@@ -418,6 +920,23 @@ export function statusTone(value) {
  * @param {{ httpTimeoutMs?: number, grpcTimeoutMs?: number }} [settings]
  *   用户设置的默认超时；旧快照没有 timeoutMs 时用它补齐。
  */
+/**
+ * 恢复表单行，兼容几种旧快照：
+ * - `formRows`：当前格式（文本 / 文件混排，文件行可挂多个文件）；
+ * - `multipartRows`：multipart 类型合并前的混排行；
+ * - `formFields`：更早的 urlencoded 键值行；
+ * - `bodyText`：最早只有 urlencoded 文本。
+ */
+function restoreFormRows(http, bodyType) {
+  if (Array.isArray(http.formRows)) return normalizeFormRows(http.formRows);
+  if (Array.isArray(http.multipartRows)) return normalizeFormRows(http.multipartRows);
+  if (Array.isArray(http.formFields)) {
+    return normalizeFormRows(http.formFields.map((row) => ({ ...row, kind: "text" })));
+  }
+  if (bodyType !== "form" || typeof http.bodyText !== "string") return [];
+  return normalizeFormRows(parseFormBody(http.bodyText).map((row) => ({ ...row, kind: "text" })));
+}
+
 export function applySnapshot(snapshot, settings) {
   const defaults = normalizeSettings(settings);
   const next = {
@@ -431,19 +950,28 @@ export function applySnapshot(snapshot, settings) {
   if (snapshot.protocol === "http" || snapshot.protocol === "grpc") next.protocol = snapshot.protocol;
 
   const http = snapshot.http && typeof snapshot.http === "object" ? snapshot.http : {};
+  const rawBodyType = typeof http.bodyType === "string" ? http.bodyType : "none";
+  const formRows = restoreFormRows(http, rawBodyType);
+  // 合并期快照用 forceMultipart / 文件行表示"发 multipart"；现在类型显式，
+  // 打开这类旧请求时直接收敛到 multipart，界面不会再出现那个勾选框。
+  let bodyType = rawBodyType;
+  if (bodyType === "form" && (http.forceMultipart === true || formRows.some((row) => row.kind === "file"))) {
+    bodyType = "multipart";
+  }
   next.http = {
     ...defaultHttp(defaults),
-    bodyType: typeof http.bodyType === "string" ? http.bodyType : "none",
+    bodyType,
     method: typeof http.method === "string" && http.method.trim() ? http.method.trim().toUpperCase() : "GET",
     url: typeof http.url === "string" ? http.url : "",
     bodyText: typeof http.bodyText === "string" ? http.bodyText : "",
+    formRows,
     params: normalizeKV(http.params),
     headers: normalizeKV(http.headers),
     timeoutMs: clampNumber(http.timeoutMs, defaults.httpTimeoutMs, 1, TIMEOUT_MAX),
     followRedirects: http.followRedirects !== false,
     skipTlsVerify: Boolean(http.skipTlsVerify),
   };
-  if (next.http.bodyType !== "none" && !BODY_CONTENT_TYPES[next.http.bodyType]) next.http.bodyType = "none";
+  next.http.bodyType = normalizeBodyType(next.http.bodyType);
 
   const grpc = snapshot.grpc && typeof snapshot.grpc === "object" ? snapshot.grpc : {};
   next.grpc = {
@@ -461,7 +989,8 @@ export function applySnapshot(snapshot, settings) {
     stream: normalizeStreamOptions(grpc.stream),
   };
 
-  next.responseTab = snapshot.responseTab === "headers" ? "headers" : "body";
+  // "request" 是「实际请求」页：快照里保留，回看历史时仍停在原来那一页。
+  next.responseTab = ["headers", "request"].includes(snapshot.responseTab) ? snapshot.responseTab : "body";
   return next;
 }
 
@@ -476,6 +1005,21 @@ export function toSnapshot(state) {
       headers: state.http.headers.map((row) => ({ ...row })),
       bodyType: state.http.bodyType,
       bodyText: state.http.bodyText,
+      // 文件内容与暂存 id 故意不落快照：恢复后由 UI 要求重新选择。
+      formRows: normalizeFormRows(state.http.formRows).map((row) =>
+        row.kind === "file"
+          ? {
+              kind: "file",
+              name: row.name,
+              enabled: row.enabled,
+              files: row.files.map((file) => ({
+                fileName: file.fileName,
+                contentType: file.contentType,
+                size: file.size,
+              })),
+            }
+          : { kind: "text", name: row.name, value: row.value, enabled: row.enabled },
+      ),
       timeoutMs: state.http.timeoutMs,
       followRedirects: state.http.followRedirects,
       skipTlsVerify: state.http.skipTlsVerify,
@@ -605,6 +1149,27 @@ export function suggestName(payload, untitled) {
 }
 
 /**
+ * 从 URL 里猜一个下载文件名，只用于 start 返回之前的占位显示。
+ *
+ * 真正的文件名以 `http/download/start` 返回的 fileName（来自 Content-Disposition）为准；
+ * 这里猜不出来就返回空串，由界面回落到"下载中"。
+ */
+export function fileNameFromUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    const segment = parsed.pathname.split("/").filter(Boolean).pop() || "";
+    if (!segment) return "";
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
+  } catch {
+    return "";
+  }
+}
+
+/**
  * 把后端返回的错误映射成人话提示。
  *
  * 后端已经在 error.data.kind 里给出了分类，优先用它；没有 data 时退回关键词匹配，
@@ -635,6 +1200,8 @@ export const ERROR_HINT_KEYS = {
   connection: "hintConnect",
   auth: "hintAuth",
   proto: "hintProto",
+  // 下载专用的分类：非 2xx 由 download/start 直接 reject，响应体没有保存。
+  status: "hintStatus",
 };
 
 export function errorMessage(error, fallback) {

@@ -43,6 +43,9 @@ const (
 	KindDNS        Kind = "dns"
 	KindTLS        Kind = "tls"
 	KindAuth       Kind = "auth"
+	// KindStatus 表示 HTTP 状态码不是 2xx。下载只接受成功响应：4xx/5xx 的
+	// 正文通常是错误页，保存下来既没用又容易掩盖真正的问题。
+	KindStatus     Kind = "status"
 	KindReflection Kind = "reflection"
 	KindProto      Kind = "proto"
 	KindCanceled   Kind = "canceled"

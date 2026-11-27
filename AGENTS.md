@@ -85,6 +85,7 @@ assets/plugin.svg
 ```bash
 npm run build                      # 必须输出 DBX_UI_BUILD_SUCCESS
 npx svelte-check --tsconfig ./jsconfig.json   # 期望 0 errors 0 warnings
+npm run test:unit                  # tests/ 下纯函数单测（node --test，无浏览器依赖）
 ```
 
 后端：
@@ -163,6 +164,7 @@ dbx-plugin package .
   # 2) 文档与商店元数据里的版本引用
   grep -n 'apitester-' README.md          # 本地产物名示例
   grep -n 'tree/v' .dbx-store.json        # source 必须指向新 tag
+  grep -n 'releaseNotes' .dbx-store.json  # 更新日志必须是本版内容，见「发版与商店」
 
   # 3) 兜底：在即将发版的 main 上，除 AGENTS.md 的约定说明外不应再有 SNAPSHOT 残留
   #    （在 dev 分支上这条会命中各版本文件本身，属正常）
@@ -210,18 +212,26 @@ dbx-plugin package .
   的 `source` 六处都要等于 `X.Y.Z` 且不带后缀，逐项清单见 `## 分支与版本号`。
   `rpc_test.go` 里的版本是测试夹具，不跟随。
 - **顺序**：`X.Y.Z-SNAPSHOT` → `X.Y.Z` 的版本提交经 PR 合入 `main` 并确认 CI 全绿 →
-  打 annotated tag `vX.Y.Z` → `gh release create`
-  （标题 `API Tester vX.Y.Z`，说明用中文写「变化 / 安装 / 校验」）。`plugin-release.yml` 监听
-  `release: published`，五个平台各自构建（`darwin-arm64`、`darwin-x64`、`linux-x64`、
-  `linux-arm64`、`windows-x64`）；本机不要 `--target` 交叉打包。
+  打 annotated tag `vX.Y.Z` → `gh release create`（标题 `API Tester vX.Y.Z`，说明只写本次
+  变化，见下一条）。`plugin-release.yml` 监听 `release: published`，五个平台各自构建
+  （`darwin-arm64`、`darwin-x64`、`linux-x64`、`linux-arm64`、`windows-x64`）；
+  本机不要 `--target` 交叉打包。
+- **Release 说明与商店更新日志同源**：`gh release create` 的说明和 `.dbx-store.json` 的
+  `releaseNotes` 写的是同一批内容——这次修了哪些 bug、新增或调整了哪些功能，逐条对应，只换
+  语言（说明用中文，`releaseNotes` 用英文基线）。**每次发版必须同时改**：只改版本号和
+  `source`、不动 `releaseNotes`，商店里就会继续展示上一版的内容。
+  说明里不要再写固定的「安装」段（下方 Assets 下载哪个平台的包、在 DBX 的「安装插件包」里
+  怎么装、插件 ID 不变覆盖安装即可）和「校验」段，也不要写「未签名候选包、签名由维护者执行」
+  这类流程说明：安装入口由商店页面承担，签名状态由候选 PR 体现，Release 正文只讲这次的变化。
 - **Release 资产**：复用 workflow 只上传 `.dbxp` 与 `release-candidates.json`；每包
   `.artifact.json` 由发布 workflow 之后的 `sidecars` job 自动补传
   （`scripts/backfill-release-sidecars.mjs`）。补传前会用 `release-candidates.json` 逐项核对
   已上传包的 `sha256`/`size`，已有的 sidecar 只校验不覆盖。不要手工 `gh release upload` 补，
   也不要绕过脚本改这两个字段——脚本失败就说明 Release 本身有问题。
-- **`.dbx-store.json` 每版都要改**：商店同步按 Release 的 **tag** 读取该文件，`releaseNotes`
-  不会自动跟版本走，`source` 应指向当期 tag。`releaseNotes` 只能写英文基线——`localizations`
-  只接受 `name` / `description`，写别的字段会被 `validate.mjs` 拒绝。
+- **`.dbx-store.json` 的读写约定**：商店同步按 Release 的 **tag** 读取该文件，`source` 应指向
+  当期 tag；更新日志的内容与同步规则见「Release 说明与商店更新日志同源」。`releaseNotes`
+  只能写英文基线——`localizations` 只接受 `name` / `description`，写别的字段会被
+  `validate.mjs` 拒绝。
 - **商店目录在 `t8y2/dbx-store`**：候选文件是 `candidates/<plugin-id>.json`，首次上架还要
   `publishers/<publisher-id>.json`；登记在 `automation/plugin-sources.json` 里
   `autoUpdate: true` 的仓库由每小时同步自动开候选 PR，首次或改展示字段才手工提。

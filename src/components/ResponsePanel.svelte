@@ -5,9 +5,18 @@
    * 四种状态：空 / 加载中 / 出错 / 完成。完成态再按协议分 HTTP 与 gRPC 两套渲染。
    * 徽标（状态码、耗时、大小、截断等）由这里统一生成，避免各分支各写一遍。
    */
-  import { highlightJSON, presentBody, prettyJSON } from "../lib/format.js";
-  import { ERROR_HINT_KEYS, formatBytes, statusTone } from "../lib/model.js";
-  import { cancelCurrentRequest, copyResponse, setResponseTab } from "../lib/store.js";
+  import { highlightJSON, presentBody, prettyJSON, responseText } from "../lib/format.js";
+  import {
+    ERROR_HINT_KEYS,
+    dispositionFileName,
+    fileNameFromUrl,
+    formatBytes,
+    headerValue,
+    isDownloadResponse,
+    responseFileSizeBytes,
+    statusTone,
+  } from "../lib/model.js";
+  import { cancelCurrentRequest, cancelDownload, copyResponse, downloadResponse, setResponseTab } from "../lib/store.js";
 
   let {
     t,
@@ -16,6 +25,8 @@
     protocol = "http",
     stream = null,
     canceling = false,
+    download = null,
+    canDownload = false,
   } = $props();
 
   /**
@@ -127,11 +138,19 @@
     ),
   );
 
+  /**
+   * 文件响应：正文是二进制，或服务器用 Content-Disposition: attachment 声明了附件。
+   *
+   * 对文件响应不显示「已截断」：被展示上限截断的只是预览，完整内容由下载重新取回。
+   * 顶着一个「已截断」徽标，用户会以为文件本身坏了或下载不完整。
+   */
+  const fileResponse = $derived(isDownloadResponse(response));
+
   const httpBadges = $derived.by(() => {
     const data = response?.data;
     if (response?.protocol !== "http" || !data) return [];
     const badges = [{ text: `${data.status} ${data.statusText || ""}`.trim(), tone: statusTone(data.status) }];
-    if (data.truncated) badges.push({ text: t("truncatedBadge"), tone: "warn" });
+    if (data.truncated && !fileResponse) badges.push({ text: t("truncatedBadge"), tone: "warn" });
     if (Array.isArray(data.redirects) && data.redirects.length) {
       badges.push({
         text: t("redirectBadge", { count: data.redirects.length }),
@@ -147,7 +166,10 @@
     if (response?.protocol !== "http" || !data) return [];
     const items = [];
     if (Number.isFinite(data.elapsedMs)) items.push(`${data.elapsedMs} ms`);
-    items.push(formatBytes(data.sizeBytes));
+    // 文件响应标的是整份文件的大小，和文件卡片、下载按钮保持一致；普通响应标实际收到的
+    // 正文大小。两边各标一个数（12 MB 的卡片配 3 MB 的顶部）只会让人怀疑哪个是真的。
+    const fileBytes = fileResponse ? responseFileSizeBytes(data) : 0;
+    items.push(formatBytes(fileBytes > 0 ? fileBytes : data.sizeBytes));
     return items;
   });
 
@@ -188,6 +210,65 @@
 
   const body = $derived(response?.kind === "done" && response.protocol === "http" ? presentBody(response.data) : null);
 
+  /**
+   * 二进制响应当成一份文件来展示：名字、大小 + 下载，比一整屏 base64 好懂。
+   * 文件名优先取 Content-Disposition，其次退回 URL 的最后一段。
+   */
+  const binaryFile = $derived.by(() => {
+    const data = response?.data;
+    if (response?.protocol !== "http" || !data || data.bodyKind !== "binary") return null;
+    const name =
+      dispositionFileName(headerValue(data.headers, "content-disposition")) ||
+      fileNameFromUrl(data.url || data.request?.url);
+    const declared = responseFileSizeBytes(data);
+    return {
+      name,
+      sizeText: declared > 0 ? formatBytes(declared) : "",
+    };
+  });
+
+  /**
+   * 下载入口只对「文件响应」出现：二进制正文，或服务器声明了 Attachment。
+   *
+   * 显示在响应面板而不是发送按钮旁边，是因为在拿到响应之前根本不知道对方返回什么；
+   * 正在下载时不显示（进度条自己带取消按钮）。宿主不支持保存文件时保留按钮但禁用，
+   * 而不是直接消失：能力位是宿主给的，用户看到灰色图标加提示比"按钮时有时无"好懂。
+   */
+  const downloadable = $derived(!download && fileResponse);
+  /**
+   * 下载图标旁的文件大小：整份文件的字节数，不是被展示上限截下的正文大小。
+   * 响应头没给 Content-Length 又刚好被截断时算不出来，这时候干脆不显示。
+   */
+  const downloadFileSize = $derived.by(() => {
+    if (!downloadable) return "";
+    const bytes = responseFileSizeBytes(response?.data);
+    return bytes > 0 ? formatBytes(bytes) : "";
+  });
+
+  /**
+   * 右上角的下载图标只服务于"没有卡片"的文件响应（比如带 Attachment 的文本）。
+   *
+   * 二进制响应已经有文件卡片、卡片里就是下载按钮，tab 行再来一个就是同一个动作摆两处。
+   */
+  const showDownloadChip = $derived(downloadable && !binaryFile);
+
+  /**
+   * 顶部只有徽标和统计时有意义：没有响应就直接把整行收掉，
+   * 否则标签栏上方会空出一条只剩「复制」的横条。
+   */
+  const hasStatusRow = $derived(
+    Boolean(response) &&
+      (response.kind === "loading" ||
+        response.kind === "error" ||
+        httpBadges.length > 0 ||
+        httpMeta.length > 0 ||
+        grpcBadges.length > 0 ||
+        grpcMeta.length > 0),
+  );
+
+  /** 没有正文可复制时禁用按钮，比点一下再弹「没有可复制的内容」更直接。 */
+  const canCopy = $derived(Boolean(responseText(response)));
+
   /** gRPC 调用失败但拿到了 status 时，同样给一条排错提示。 */
   const grpcHint = $derived.by(() => {
     const data = response?.data;
@@ -195,36 +276,55 @@
     const key = ERROR_HINT_KEYS[data?.errorKind || response?.errorKind];
     return key ? t(key) : "";
   });
+
+  /**
+   * 流式保存的进度百分比。
+   *
+   * 总大小未知（chunked / 压缩后 contentLength 为 -1）时返回 null，进度条改用"来回滑动"
+   * 的不确定态——不编一个假进度，免得用户以为下载卡住了。
+   */
+  const downloadPercent = $derived.by(() => {
+    if (!download || !(download.totalBytes > 0)) return null;
+    const percent = (Number(download.receivedBytes) / download.totalBytes) * 100;
+    return Math.max(0, Math.min(100, percent));
+  });
+
+  /** 已收 / 总大小；总大小未知时只显示已收。 */
+  const downloadSizeText = $derived.by(() => {
+    if (!download) return "";
+    const received = formatBytes(Number(download.receivedBytes) || 0);
+    if (!(download.totalBytes > 0)) return received;
+    return `${received} / ${formatBytes(download.totalBytes)}`;
+  });
 </script>
 
 <section class="response">
-  <div class="response-head">
-    <span class="response-title">{t("response")}</span>
-    <span class="response-badges">
-      {#if response?.kind === "loading"}
-        <span class="pill pill--info">{t("loading")}</span>
-      {:else if response?.kind === "error"}
-        {#if response.errorKind === "canceled"}
-          <span class="pill pill--warn">{t("canceledBadge")}</span>
-        {:else}
-          <span class="pill pill--err">{failureLabel}</span>
+  {#if hasStatusRow}
+    <div class="response-head">
+      <span class="response-badges">
+        {#if response?.kind === "loading"}
+          <span class="pill pill--info">{t("loading")}</span>
+        {:else if response?.kind === "error"}
+          {#if response.errorKind === "canceled"}
+            <span class="pill pill--warn">{t("canceledBadge")}</span>
+          {:else}
+            <span class="pill pill--err">{failureLabel}</span>
+          {/if}
+          {#if Number.isFinite(response.elapsedMs)}<span class="meta">{response.elapsedMs} ms</span>{/if}
+        {:else if response?.protocol === "http"}
+          {#each httpBadges as badge (badge.text)}
+            <span class="pill pill--{badge.tone}" title={badge.title}>{badge.text}</span>
+          {/each}
+          {#each httpMeta as item (item)}<span class="meta">{item}</span>{/each}
+        {:else if response?.protocol === "grpc"}
+          {#each grpcBadges as badge (badge.text)}
+            <span class="pill pill--{badge.tone}">{badge.text}</span>
+          {/each}
+          {#each grpcMeta as item (item)}<span class="meta">{item}</span>{/each}
         {/if}
-        {#if Number.isFinite(response.elapsedMs)}<span class="meta">{response.elapsedMs} ms</span>{/if}
-      {:else if response?.protocol === "http"}
-        {#each httpBadges as badge (badge.text)}
-          <span class="pill pill--{badge.tone}" title={badge.title}>{badge.text}</span>
-        {/each}
-        {#each httpMeta as item (item)}<span class="meta">{item}</span>{/each}
-      {:else if response?.protocol === "grpc"}
-        {#each grpcBadges as badge (badge.text)}
-          <span class="pill pill--{badge.tone}">{badge.text}</span>
-        {/each}
-        {#each grpcMeta as item (item)}<span class="meta">{item}</span>{/each}
-      {/if}
-    </span>
-    <span class="grow"></span>
-    <button class="btn btn-ghost btn-sm" type="button" onclick={() => void copyResponse()}>{t("copy")}</button>
-  </div>
+      </span>
+    </div>
+  {/if}
 
   <div class="tabs tabs--response">
     <button class="tab" class:is-active={responseTab === "body"} type="button" onclick={() => setResponseTab("body")}>
@@ -233,9 +333,100 @@
     <button class="tab" class:is-active={responseTab === "headers"} type="button" onclick={() => setResponseTab("headers")}>
       {headersTabLabel}
     </button>
+    {#if activeProtocol !== "grpc"}
+      <!-- 顺序即阅读顺序：先看响应，再看响应头，最后才核对到底发了什么。 -->
+      <button class="tab" class:is-active={responseTab === "request"} type="button" onclick={() => setResponseTab("request")}>
+        {t("sentRequestTab")}
+      </button>
+    {/if}
+    <span class="grow"></span>
+    <!-- 面板级动作都收在标签行右侧：下载（带大小）和复制各占一个 chip，视觉重量一致。 -->
+    <span class="tabs-actions">
+      {#if showDownloadChip}
+        <!-- 文件响应才给下载入口：图标和文件大小合成一个 chip，避免一个图标孤零零地
+             挨着一段小字，两者也不用各自猜垂直中心。 -->
+        <button
+          class="panel-chip"
+          type="button"
+          aria-label={downloadFileSize ? t("downloadFileWithSize", { size: downloadFileSize }) : t("downloadFile")}
+          title={downloadFileSize ? t("downloadFileWithSize", { size: downloadFileSize }) : t("downloadFile")}
+          disabled={!canDownload}
+          onclick={() => void downloadResponse()}
+        >
+          <svg viewBox="0 0 14 14" width="14" height="14" fill="none" aria-hidden="true">
+            <path
+              d="M7 2.2v6.1m0 0 2.3-2.3M7 8.3 4.7 6"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path d="M2.4 9.6v1.5c0 .4.3.7.7.7h7.8c.4 0 .7-.3.7-.7V9.6" stroke="currentColor" stroke-width="1.5"
+              stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          {#if downloadFileSize}
+            <span class="panel-chip-size">{downloadFileSize}</span>
+          {/if}
+        </button>
+      {/if}
+      <button
+        class="panel-chip panel-chip--icon"
+        type="button"
+        aria-label={t("copy")}
+        title={t("copy")}
+        disabled={!canCopy}
+        onclick={() => void copyResponse()}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="13"
+          height="13"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <rect x="9" y="9" width="12" height="12" rx="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      </button>
+    </span>
   </div>
 
   <div class="response-body">
+    {#if download}
+      <!-- 清楚地区分「正在写文件」和「已经拿到的响应」：进度放最上面，旧内容照旧在下面。 -->
+      <div class="download-progress">
+        <div class="download-head">
+          <span class="spinner" aria-hidden="true"></span>
+          <span class="download-name" title={download.fileName || ""}>{download.fileName || t("downloading")}</span>
+          <span class="download-size">{downloadSizeText}</span>
+          <span class="grow"></span>
+          <button
+            class="btn btn-secondary btn-sm"
+            type="button"
+            disabled={download.canceling}
+            onclick={() => void cancelDownload()}
+          >
+            {download.canceling ? t("stopping") : t("stopDownload")}
+          </button>
+        </div>
+        <div
+          class="download-bar"
+          class:is-indeterminate={downloadPercent === null}
+          role="progressbar"
+          aria-label={t("downloading")}
+          aria-valuemin={downloadPercent === null ? undefined : 0}
+          aria-valuemax={downloadPercent === null ? undefined : download.totalBytes}
+          aria-valuenow={downloadPercent === null ? undefined : Number(download.receivedBytes) || 0}
+        >
+          <span class="download-bar-fill" style:width={downloadPercent === null ? undefined : `${downloadPercent}%`}></span>
+        </div>
+      </div>
+    {/if}
+
     {#if showTimeline}
       <div class="timeline" role="log" aria-live="polite" aria-label={t("response")}>
         <div class="timeline-head">
@@ -361,29 +552,152 @@
   {/if}
 {/snippet}
 
+{#snippet sentBody(sent)}
+  {@const body = sent.body}
+  {@const rawType = headerValue(sent.headers, "content-type")}
+  <!-- 只留媒体类型：multipart 的 boundary 已经在请求头里，这里再堆一遍只会撑破徽标。 -->
+  {@const mediaType = rawType.split(";")[0].trim()}
+  {#if !body || body.kind === "empty"}
+    <p class="side-empty">{t("emptyRequestBody")}</p>
+  {:else}
+    <div class="body-meta">
+      {#if mediaType}<span class="type-chip">{mediaType}</span>{/if}
+      <span class="body-size">{formatBytes(body.size)}</span>
+      {#if body.kind === "multipart"}
+        <span class="body-size">
+          {t("multipartSummary", {
+            fields: body.multipart?.fields?.length || 0,
+            files: body.multipart?.files?.length || 0,
+          })}
+        </span>
+      {/if}
+    </div>
+    {#if body.kind === "text"}
+      <pre class="code-block">{body.text || ""}</pre>
+      {#if body.truncated}
+        <p class="section-note">{t("sentBodyTruncated", { size: formatBytes(body.size) })}</p>
+      {/if}
+    {:else if body.kind === "binary"}
+      <p class="side-empty">{t("binaryRequestBody", { size: formatBytes(body.size) })}</p>
+    {:else if body.kind === "multipart"}
+      {#if body.multipart?.fields?.length}
+        {@render headerTable(body.multipart.fields)}
+      {/if}
+      {#if body.multipart?.files?.length}
+        <ul class="sent-files">
+          {#each body.multipart.files as file, index (index)}
+            <li class="sent-file">
+              <span class="type-chip">{file.contentType || t("none")}</span>
+              <span class="sent-file-part">{file.name || ""} →</span>
+              <span class="sent-file-name">{file.fileName || ""}</span>
+              <span class="body-size">{formatBytes(file.size)}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    {/if}
+  {/if}
+{/snippet}
+
 {#snippet httpResult(data, presented)}
   {#if !data}
     <div class="side-empty">{t("emptyBody")}</div>
   {:else if responseTab === "headers"}
+    <!-- 这一页就只回答"服务器回了什么头"：不掺请求信息，也不做开发者工具那种「常规」表。 -->
     {#if Array.isArray(data.redirects) && data.redirects.length}
       <div class="section-title">{t("redirects")}</div>
       {@render headerTable(data.redirects.map((hop) => ({ name: String(hop.status), value: hop.url })))}
     {/if}
+
     <div class="section-title">{t("responseHeaders")}</div>
     {@render headerTable(data.headers)}
-  {:else}
-    {#if data.truncated}
-      <p class="response-note">{t("truncated", { size: formatBytes(data.sizeBytes) })}</p>
-    {/if}
-    {#if data.bodyKind === "binary"}
-      <div class="section-title">{t("binaryBody")}</div>
-      <pre class="code-block">{data.bodyBase64 || ""}</pre>
-    {:else if !presented || presented.variant === "empty"}
-      <div class="side-empty">{t("emptyBody")}</div>
-    {:else if presented.json}
-      <pre class="code-block">{@html highlightJSON(presented.text)}</pre>
+  {:else if responseTab === "request"}
+    <!-- 「实际请求」独立成页：响应那两页只放响应，核对"我到底发了什么"不必和响应混着看。 -->
+    {@const sent = data.request}
+    {#if sent}
+      <div class="section-title">{t("requestUrl")}</div>
+      <div class="request-target">
+        <span class="method-chip">{sent.method || ""}</span>
+        <!-- 长 URL 允许换行，断在任意处：这里要的是"能看全"，不是一行省略号。 -->
+        <span class="request-target-url">{sent.url || ""}</span>
+      </div>
+
+      <div class="section-title">{t("headers")}</div>
+      {@render headerTable(sent.headers)}
+      <p class="section-note">{t("sentHeadersNote")}</p>
+
+      <div class="section-title">{t("body")}</div>
+      {@render sentBody(sent)}
     {:else}
-      <pre class="code-block">{presented.text}</pre>
+      <!-- 旧响应没有 request 字段：宁可不显示，也不把编辑器里的输入冒充成线上报文。 -->
+      <div class="side-empty">{t("none")}</div>
+    {/if}
+  {:else}
+    {#if data.bodyKind === "binary"}
+      {@const file = binaryFile}
+      <!-- 二进制响应当成一份文件来给：图标 + 文件名 + 带大小的下载按钮，
+           不铺 base64、不标内容类型，用户在这里只需要决定要不要把文件拿走。 -->
+      {#if file}
+        <div class="file-card">
+          <div class="file-card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
+              <path d="M6.5 3.5h7l4 4v13h-11z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+              <path d="M13.5 3.6v3.9h3.9" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+            </svg>
+          </div>
+          <div class="file-card-main">
+            <div class="file-card-name" title={file.name || undefined}>{file.name || t("binaryFile")}</div>
+            {#if !canDownload}
+              <p class="file-card-hint">{t("downloadUnsupported")}</p>
+            {/if}
+          </div>
+          <div class="file-card-actions">
+            <button
+              class="file-download"
+              type="button"
+              disabled={!canDownload || Boolean(download)}
+              onclick={() => void downloadResponse()}
+            >
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" aria-hidden="true">
+                <path
+                  d="M8 2.6v6.9m0 0 2.7-2.7M8 9.5 5.3 6.8"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M2.9 11v1.2c0 .6.4 1 1 1h8.2c.6 0 1-.4 1-1V11"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <span>{download ? t("downloading") : t("downloadFile")}</span>
+              {#if !download && file.sizeText}
+                <span class="file-download-size">{file.sizeText}</span>
+              {/if}
+            </button>
+          </div>
+        </div>
+      {/if}
+    {:else}
+      {#if data.truncated}
+        <!-- 文件响应不提示「已截断」，只说明正文是预览。 -->
+        <p class="response-note">
+          {fileResponse
+            ? t("previewTruncated", { size: formatBytes(data.sizeBytes) })
+            : t("truncated", { size: formatBytes(data.sizeBytes) })}
+        </p>
+      {/if}
+      {#if !presented || presented.variant === "empty"}
+        <div class="side-empty">{t("emptyBody")}</div>
+      {:else if presented.json}
+        <pre class="code-block">{@html highlightJSON(presented.text)}</pre>
+      {:else}
+        <pre class="code-block">{presented.text}</pre>
+      {/if}
     {/if}
   {/if}
 {/snippet}
@@ -696,5 +1010,272 @@
 
   .grow {
     flex: 1;
+  }
+
+  /* 说明文字：把"哪些头不显示"讲清楚，别让人以为没显示就是没发。 */
+  .section-note {
+    margin: 6px 0 2px;
+    padding: 0 2px;
+    color: var(--muted);
+    font-size: 10.5px;
+    line-height: 1.5;
+  }
+
+  /* 「实际请求」的地址块：浅底 + 方法徽标，和下面的表格拉开层级。 */
+  .request-target {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 4%, transparent);
+  }
+
+  .method-chip {
+    flex: none;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 14%, transparent);
+  }
+
+  /* 长 URL 允许在任意处换行：这里要"能看全"，不是一行省略号。 */
+  .request-target-url {
+    flex: 1;
+    min-width: 0;
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+
+  .body-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 8px;
+  }
+
+  .type-chip {
+    padding: 1px 7px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+
+  .body-size {
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* multipart 的文件清单：一行一个文件，字段名 → 文件名 → 大小。 */
+  .sent-files {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .sent-file {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+
+  .sent-file-part {
+    flex: none;
+    color: var(--muted);
+  }
+
+  .sent-file-name {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  /*
+   * 标签行右侧的面板级动作 chip：下载与复制共用一套边框/圆角/悬停，
+   * 免得标题旁一个文字按钮、标签行里一个带框按钮，两种按钮风格打架。
+   */
+  .tabs-actions {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .panel-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 4%, transparent);
+    color: var(--muted);
+    cursor: pointer;
+    transition:
+      color 0.12s ease,
+      border-color 0.12s ease,
+      background-color 0.12s ease;
+  }
+
+  /* 纯图标 chip 收成正方形：没有文字就不要留两侧的横向内边距。 */
+  .panel-chip--icon {
+    width: 26px;
+    padding: 0;
+  }
+
+  .panel-chip:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--fg) 24%, transparent);
+    background: color-mix(in srgb, var(--fg) 7%, transparent);
+    color: var(--fg);
+  }
+
+  .panel-chip:focus-visible {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 22%, transparent);
+  }
+
+  .panel-chip:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .panel-chip svg {
+    flex: none;
+  }
+
+  /* 二进制响应：一行文件卡片，动作只有一个——把文件拿走。 */
+  .file-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--fg) 3%, var(--panel));
+  }
+
+  .file-card-icon {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--primary) 10%, transparent);
+    color: var(--primary);
+  }
+
+  .file-card-main {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .file-card-name {
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 640;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .file-card-hint {
+    margin: 4px 0 0;
+    color: var(--warning);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .file-card-actions {
+    flex: none;
+  }
+
+  /* 文件下载是这一屏唯一的主操作：比其它小按钮高一档，用色块把它和卡片分开。 */
+  .file-download {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 11px;
+    border: none;
+    border-radius: 8px;
+    background: var(--primary);
+    color: var(--primary-fg);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--primary) 30%, transparent);
+    transition:
+      background-color 0.12s ease,
+      box-shadow 0.12s ease;
+  }
+
+  .file-download:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--primary) 86%, black);
+    box-shadow: 0 2px 6px color-mix(in srgb, var(--primary) 32%, transparent);
+  }
+
+  .file-download:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 24%, transparent);
+  }
+
+  .file-download:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  .file-download svg {
+    flex: none;
+  }
+
+  /* 大小是按钮里的补充信息：用一条分隔线隔开，不用第二个按钮或另起一行。 */
+  .file-download-size {
+    padding-left: 7px;
+    border-left: 1px solid color-mix(in srgb, var(--primary-fg) 32%, transparent);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* 大小是补充信息：始终比图标弱一档，悬停时也不跟着变亮。 */
+  .panel-chip-size {
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    white-space: nowrap;
   }
 </style>

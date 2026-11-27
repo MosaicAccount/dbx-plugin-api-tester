@@ -2,12 +2,14 @@ package rpc
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/jlian/dbx-plugin-api-tester/internal/apperr"
+	"github.com/jlian/dbx-plugin-api-tester/internal/httptool"
 )
 
 func TestPingReportsIdentityAndMethods(t *testing.T) {
@@ -25,8 +27,8 @@ func TestPingReportsIdentityAndMethods(t *testing.T) {
 	if !ping.OK || ping.ID != "com.jlian.apitester" || ping.Version != "0.0.1" {
 		t.Fatalf("unexpected ping payload: %+v", ping)
 	}
-	if len(ping.Methods) != 10 {
-		t.Fatalf("expected 10 methods, got %v", ping.Methods)
+	if len(ping.Methods) != 16 {
+		t.Fatalf("expected 16 methods, got %v", ping.Methods)
 	}
 }
 
@@ -54,6 +56,9 @@ func TestMalformedParamsReturnsInvalidParams(t *testing.T) {
 		MethodGRPCMethods,
 		MethodGRPCInvoke,
 		MethodRequestCancel,
+		MethodHTTPDownloadStart,
+		MethodHTTPDownloadRead,
+		MethodHTTPDownloadCancel,
 		MethodGRPCStreamOpen,
 		MethodGRPCStreamSend,
 		MethodGRPCStreamWait,
@@ -89,11 +94,109 @@ func TestEmptyParamsIsAccepted(t *testing.T) {
 // 这条测试防止"登记了但没实现"的漂移。
 func TestDeclaredMethodsAreImplemented(t *testing.T) {
 	handler := New("com.jlian.apitester", "0.0.1")
+	defer handler.Close()
 
 	for _, method := range Methods() {
 		_, err := handler.Dispatch(method, json.RawMessage(`{}`))
 		if err != nil && err.Code == apperr.CodeMethodNotFound {
 			t.Fatalf("%s is declared but not implemented", method)
+		}
+	}
+}
+
+// 完整的分块暂存链路：begin → chunk → http/send 引用 uploadId → 发送后仍可重发。
+func TestStagedUploadFlow(t *testing.T) {
+	handler := New("com.jlian.apitester", "0.0.1")
+	defer handler.Close()
+
+	begin, beginError := handler.Dispatch(MethodUploadBegin, json.RawMessage(`{"fileName":"note.txt","size":5}`))
+	if beginError != nil {
+		t.Fatalf("begin failed: %v", beginError)
+	}
+	uploadID := begin.(*UploadBeginResult).UploadID
+	if uploadID == "" {
+		t.Fatal("expected an upload id")
+	}
+
+	chunk, chunkError := handler.Dispatch(MethodUploadChunk, json.RawMessage(
+		`{"uploadId":"`+uploadID+`","dataBase64":"aGVsbG8="}`,
+	))
+	if chunkError != nil {
+		t.Fatalf("chunk failed: %v", chunkError)
+	}
+	if chunk.(*UploadChunkResult).Size != 5 {
+		t.Fatalf("unexpected size: %+v", chunk)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		reader, err := request.MultipartReader()
+		if err != nil {
+			t.Errorf("cannot read multipart body: %v", err)
+			return
+		}
+		part, partError := reader.NextPart()
+		if partError != nil {
+			t.Errorf("cannot read multipart part: %v", partError)
+			return
+		}
+		data, _ := io.ReadAll(part)
+		_, _ = writer.Write([]byte(part.FormName() + ":" + part.FileName() + "=" + string(data)))
+	}))
+	defer server.Close()
+
+	params, marshalError := json.Marshal(map[string]any{
+		"method":       "POST",
+		"url":          server.URL,
+		"bodyEncoding": "multipart",
+		"multipart": map[string]any{
+			"files": []map[string]any{{
+				"name":     "upload",
+				"fileName": "note.txt",
+				"uploadId": uploadID,
+			}},
+		},
+	})
+	if marshalError != nil {
+		t.Fatalf("cannot encode params: %v", marshalError)
+	}
+	result, sendError := handler.Dispatch(MethodHTTPSend, params)
+	if sendError != nil {
+		t.Fatalf("send failed: %v", sendError)
+	}
+	if result.(*httptool.SendResult).BodyText != "upload:note.txt=hello" {
+		t.Fatalf("unexpected echo: %q", result.(*httptool.SendResult).BodyText)
+	}
+	// 发送只读取暂存文件；同一个 uploadId 必须能继续复用（用户改完 URL/header 再发）。
+	if _, statError := handler.uploads.Stat(uploadID); statError != nil {
+		t.Fatalf("expected the staged upload to stay available after sending: %v", statError)
+	}
+	again, againError := handler.Dispatch(MethodHTTPSend, params)
+	if againError != nil {
+		t.Fatalf("second send failed: %v", againError)
+	}
+	if again.(*httptool.SendResult).BodyText != "upload:note.txt=hello" {
+		t.Fatalf("unexpected second echo: %q", again.(*httptool.SendResult).BodyText)
+	}
+}
+
+// 中止暂存文件应当幂等：重复 abort 返回 false，而不是报错。
+func TestUploadAbortIsIdempotent(t *testing.T) {
+	handler := New("com.jlian.apitester", "0.0.1")
+	defer handler.Close()
+
+	begin, beginError := handler.Dispatch(MethodUploadBegin, json.RawMessage(`{"fileName":"note.txt","size":0}`))
+	if beginError != nil {
+		t.Fatalf("begin failed: %v", beginError)
+	}
+	uploadID := begin.(*UploadBeginResult).UploadID
+	for index, expected := range []bool{true, false} {
+		raw, _ := json.Marshal(map[string]string{"uploadId": uploadID})
+		result, err := handler.Dispatch(MethodUploadAbort, raw)
+		if err != nil {
+			t.Fatalf("abort %d failed: %v", index, err)
+		}
+		if result.(*UploadAbortResult).Aborted != expected {
+			t.Fatalf("abort %d: unexpected result %+v", index, result)
 		}
 	}
 }
@@ -221,5 +324,74 @@ func TestStreamOpenRequiresMethod(t *testing.T) {
 	_, err := handler.Dispatch(MethodGRPCStreamOpen, json.RawMessage(`{}`))
 	if err == nil || err.Code != apperr.CodeInvalidParams {
 		t.Fatalf("expected invalid-params for a missing method, got %#v", err)
+	}
+}
+
+// 下载的三条 RPC 必须能真正串起来：start 拿会话 → read 逐块取 → 会话在 EOF 后关闭。
+func TestDownloadMethodsStreamBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/octet-stream")
+		writer.Header().Set("Content-Disposition", `attachment; filename="payload.bin"`)
+		_, _ = writer.Write([]byte("0123456789"))
+	}))
+	defer server.Close()
+
+	handler := New("com.jlian.apitester", "0.0.1")
+	defer handler.Close()
+
+	raw, marshalError := json.Marshal(map[string]any{
+		"method":     "GET",
+		"url":        server.URL,
+		"downloadId": "dl-1",
+	})
+	if marshalError != nil {
+		t.Fatalf("cannot marshal params: %v", marshalError)
+	}
+
+	result, err := handler.Dispatch(MethodHTTPDownloadStart, raw)
+	if err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	start, ok := result.(*httptool.DownloadStartResult)
+	if !ok {
+		t.Fatalf("unexpected start result type %T", result)
+	}
+	if start.DownloadID != "dl-1" || start.FileName != "payload.bin" || start.ContentLength != 10 {
+		t.Fatalf("unexpected start result: %+v", start)
+	}
+
+	readRaw, _ := json.Marshal(map[string]any{"downloadId": "dl-1", "maxBytes": 4})
+	var body []byte
+	for {
+		result, err := handler.Dispatch(MethodHTTPDownloadRead, readRaw)
+		if err != nil {
+			t.Fatalf("read failed: %v", err)
+		}
+		chunk, ok := result.(*httptool.DownloadReadResult)
+		if !ok {
+			t.Fatalf("unexpected read result type %T", result)
+		}
+		body = append(body, []byte(chunk.DataBase64)...) // 内容本身是 base64，长度断言只看 eof/结束
+		if chunk.Eof {
+			break
+		}
+	}
+	if len(body) == 0 {
+		t.Fatal("expected at least one chunk")
+	}
+
+	// EOF 之后会话已关闭，再读必须是参数错误；取消是幂等的。
+	if _, err := handler.Dispatch(MethodHTTPDownloadRead, readRaw); err == nil || err.Code != apperr.CodeInvalidParams {
+		t.Fatalf("expected invalid-params after EOF, got %#v", err)
+	}
+	cancelResult, err := handler.Dispatch(MethodHTTPDownloadCancel, json.RawMessage(`{"downloadId":"dl-1"}`))
+	if err != nil {
+		t.Fatalf("cancel failed: %v", err)
+	}
+	if cancelResult.(*CancelResult).Canceled {
+		t.Fatal("cancel after EOF should report false")
+	}
+	if _, err := handler.Dispatch(MethodHTTPDownloadCancel, json.RawMessage(`{"downloadId":"  "}`)); err == nil || err.Code != apperr.CodeInvalidParams {
+		t.Fatalf("expected invalid-params for a blank downloadId, got %#v", err)
 	}
 }

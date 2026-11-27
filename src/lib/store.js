@@ -3,10 +3,16 @@ import * as host from "./host.js";
 import { translator } from "./i18n.js";
 import {
   BRIDGE_BODY_LIMIT,
+  DOWNLOAD_CHUNK_DEFAULT,
+  DOWNLOAD_FALLBACK_NAME,
+  DOWNLOAD_READ_TIMEOUT_MS,
   DRAFT_LIMIT,
   GRPC_TIMEOUT_DEFAULT,
   HISTORY_LIMIT,
   HTTP_TIMEOUT_DEFAULT,
+  MULTIPART_FILE_COUNT_LIMIT,
+  MULTIPART_TOTAL_LIMIT,
+  MULTIPART_UPLOAD_CHUNK,
   PROTO_FILE_COUNT_LIMIT,
   PROTO_FILE_LIMIT,
   PROTO_TOTAL_LIMIT,
@@ -22,7 +28,9 @@ import {
   STREAM_WAIT_MIN,
   TIMEOUT_MAX,
   applySnapshot,
+  blankFormRow,
   blankKV,
+  buildBodyParams,
   buildHeaders,
   buildRequestUrl,
   byteLength,
@@ -34,8 +42,15 @@ import {
   describeErrorKind,
   enabledEntries,
   errorMessage,
+  fileNameFromUrl,
   folderAncestors,
   folderParent,
+  formatBytes,
+  formFileEntries,
+  guessContentType,
+  httpContentType,
+  multipartTotalBytes,
+  planFormFiles,
   normalizeFolder,
   normalizeSettings,
   requestMethod,
@@ -43,6 +58,8 @@ import {
   toSnapshot,
   truncate,
   uid,
+  jsonIssue,
+  normalizeBodyType,
 } from "./model.js";
 import { responseText } from "./format.js";
 
@@ -80,8 +97,18 @@ function createInitialState() {
     discovering: false,
     /** 已发出终止指令，等 sidecar 收尾。 */
     canceling: false,
+    /**
+     * 流式保存的进行期状态；null 表示没有在下载。
+     * `totalBytes` 未知（chunked / 压缩后）时为 -1，`fileName` 在 start 返回前先用 URL 推断值。
+     */
+    download: null,
     /** 交互式会话（客户端流 / 双向流）的运行期状态；不持久化，见 createStreamState。 */
     stream: createStreamState(),
+    /**
+     * 发送前校验失败的原因（目前只有 JSON 正文）；null 表示没有拦下来的问题。
+     * 属于运行期状态，不进草稿/历史，编辑正文或切换请求时清空。
+     */
+    bodyIssue: null,
   };
 }
 
@@ -149,6 +176,15 @@ let cancelTimer = null;
 const CANCEL_RPC_TIMEOUT_MS = 5000;
 /** 终止指令发出后最多再等这么久；后端没有收尾也要让界面先退出加载态。 */
 const CANCEL_SETTLE_MS = 8000;
+
+/**
+ * 当前这次流式保存。
+ *
+ * 下载不复用 activeRun：它没有 requestId，取消也走另一条 RPC（http/download/cancel），
+ * 而且和 send 共享不了"迟到结果"的判断。seq 用来丢弃被取消/被新请求取代之后才回来的读取。
+ */
+let activeDownload = null;
+let downloadSeq = 0;
 
 /** 语言切换后刷新状态层使用的翻译函数。 */
 export function refreshTranslator() {
@@ -242,11 +278,11 @@ export function updateSettings(patch) {
   return settings;
 }
 
-export function showToast(message, tone) {
+export function showToast(message, tone, durationMs = 3200) {
   if (!message) return;
   toast.set({ message, tone: tone || "" });
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.set(null), 3200);
+  toastTimer = setTimeout(() => toast.set(null), durationMs);
 }
 
 export function dismissToast() {
@@ -400,6 +436,7 @@ export async function initialize() {
 
 /** 把一份快照写入表单状态。 */
 export function applySnapshotToState(snapshot) {
+  abortFormUploads(current().http.formRows);
   const normalized = applySnapshot(snapshot, current().settings);
   // 旧会话属于上一个请求；不关就会在 sidecar 里留着一条没人用的流。
   resetStreamSession("", false);
@@ -409,6 +446,7 @@ export function applySnapshotToState(snapshot) {
     http: normalized.http,
     grpc: normalized.grpc,
     responseTab: normalized.responseTab,
+    bodyIssue: null,
     // 切换请求时清掉上一次的发现结果，避免把 A 服务的 method 用到 B 服务上。
     response: null,
   }));
@@ -467,8 +505,244 @@ export function setProtocol(protocol) {
 }
 
 export function patchHttp(patch) {
-  update((s) => ({ ...s, http: { ...s.http, ...patch } }));
+  update((s) => ({
+    ...s,
+    // 正文、类型或方法一变，上一次的 JSON 校验结论就过期了，不能留着旧的错误条。
+    bodyIssue: "bodyText" in patch || "bodyType" in patch || "method" in patch ? null : s.bodyIssue,
+    http: { ...s.http, ...patch },
+  }));
   scheduleDraftPersist();
+}
+
+/** 关掉发送前校验的错误条。 */
+export function clearBodyIssue() {
+  update((s) => (s.bodyIssue ? { ...s, bodyIssue: null } : s));
+}
+
+// --- Form / Multipart Form 编辑 -------------------------------------------
+
+/** 用最新状态更新表单行，避免事件闭包里的旧数组覆盖用户刚输入的内容。 */
+export function updateFormRows(updater) {
+  update((s) => ({ ...s, http: { ...s.http, formRows: updater(s.http.formRows || []) } }));
+  scheduleDraftPersist();
+}
+
+export function addFormRow(kind = "text") {
+  updateFormRows((rows) => [...rows, blankFormRow(kind)]);
+}
+
+export function patchFormRow(index, patch) {
+  updateFormRows((rows) => rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+}
+
+/** 文本 ⇄ 文件切换；切回文本时释放已经暂存的文件，避免占着磁盘没人用。 */
+export function setFormRowKind(index, kind) {
+  const row = (current().http.formRows || [])[index];
+  if (!row || row.kind === kind || (kind !== "text" && kind !== "file")) return;
+  if (kind === "text") {
+    for (const file of row.files || []) void abortStagedUpload(file.uploadId);
+    updateFormRows((rows) => rows.map((item, rowIndex) => (rowIndex === index ? { ...item, kind, files: [] } : item)));
+    return;
+  }
+  updateFormRows((rows) => rows.map((item, rowIndex) => (rowIndex === index ? { ...item, kind } : item)));
+}
+
+export function removeFormRow(index) {
+  const row = (current().http.formRows || [])[index];
+  for (const file of row?.files || []) void abortStagedUpload(file.uploadId);
+  updateFormRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index));
+}
+
+export function removeFormFile(fileId) {
+  const target = findFormFile(current().http.formRows, fileId);
+  if (target?.file?.uploadId) void abortStagedUpload(target.file.uploadId);
+  updateFormRows((rows) =>
+    rows.map((row) => (row.kind === "file" ? { ...row, files: (row.files || []).filter((file) => file.id !== fileId) } : row)),
+  );
+}
+
+/** 在最新的行状态里按 id 找文件（包括被禁用 / 已删除但仍在暂存中的行）。 */
+function findFormFile(rows, fileId) {
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (row?.kind !== "file") continue;
+    const file = (row.files || []).find((item) => item.id === fileId);
+    if (file) return { row, file };
+  }
+  return null;
+}
+
+function patchFormFile(fileId, patch) {
+  updateFormRows((rows) =>
+    rows.map((row) => {
+      if (row.kind !== "file") return row;
+      let changed = false;
+      const files = (row.files || []).map((file) => {
+        if (file.id !== fileId) return file;
+        changed = true;
+        return { ...file, ...patch };
+      });
+      return changed ? { ...row, files } : row;
+    }),
+  );
+}
+
+/** 删除 sidecar 里的暂存文件。失败不影响界面，过期后由后端自行回收。 */
+async function abortStagedUpload(uploadId) {
+  if (!uploadId || !host.available) return;
+  try {
+    await host.invoke("http/upload/abort", { uploadId }, { timeoutMs: 5000 });
+  } catch {
+    // 暂存文件有 TTL；这里失败不需要打断用户。
+  }
+}
+
+function abortFormUploads(rows) {
+  for (const row of Array.isArray(rows) ? rows : []) {
+    for (const file of row?.files || []) void abortStagedUpload(file.uploadId);
+  }
+}
+
+/**
+ * sidecar 重启或暂存区回收后，内存里的 uploadId 会全部失效。
+ * 保留文件名与大小，只把 uploadId 清掉，让发送前的检查给出「重新选择」而不是
+ * 把 sidecar 的 Upload has expired 直接甩给用户。
+ */
+function invalidateFormUploads() {
+  updateFormRows((rows) =>
+    rows.map((row) => ({
+      ...row,
+      files: (row.files || []).map((file) =>
+        file.uploadId ? { ...file, uploadId: "", status: "missing", progress: 0 } : file,
+      ),
+    })),
+  );
+}
+
+/**
+ * 给某一行添加文件（多选追加），或替换该行里的一个文件。
+ *
+ * 先按配额预检，再插占位行，然后逐个分块传给 sidecar。文件内容不经过 store 的
+ * 快照状态，只保留 uploadId；切换请求或移除文件时释放。
+ */
+export async function addFormFiles(rowIndex, sources, options = {}) {
+  const list = (Array.isArray(sources) ? sources : []).filter(Boolean);
+  if (!list.length) return;
+  const rows = current().http.formRows || [];
+  const row = rows[rowIndex];
+  if (!row) {
+    for (const source of list) void source.close?.();
+    return;
+  }
+
+  const { accepted, rejected } = planFormFiles(rows, list, { rowIndex, fileId: options.fileId });
+  for (const item of rejected) void item.source?.close?.();
+  if (rejected.length) showToast(describeRejectedFiles(rejected), "error", 5200);
+  if (!accepted.length) return;
+
+  if (options.fileId) {
+    const replaced = findFormFile(rows, options.fileId)?.file;
+    if (replaced?.uploadId) void abortStagedUpload(replaced.uploadId);
+  }
+
+  const placeholders = accepted.map((source) => ({
+    id: uid(),
+    fileName: source.fileName,
+    contentType: source.contentType || guessContentType(source.fileName),
+    size: Number(source.size) || 0,
+    uploadId: "",
+    status: "staging",
+    progress: 0,
+  }));
+
+  updateFormRows((currentRows) =>
+    currentRows.map((currentRow, index) => {
+      if (index !== rowIndex) return currentRow;
+      const files = (currentRow.files || []).filter((file) => !options.fileId || file.id !== options.fileId);
+      return { ...currentRow, kind: "file", files: [...files, ...placeholders] };
+    }),
+  );
+
+  // 串行暂存：文件本来就在本地磁盘上，并行只会让进度抖动。
+  for (let index = 0; index < accepted.length; index += 1) {
+    await stageUploadSource(placeholders[index], accepted[index]);
+  }
+}
+
+/** 把拒绝原因写成一句能看懂的话：带上实际大小、上限和"未添加"。 */
+function describeRejectedFiles(rejected) {
+  const first = rejected[0];
+  let message;
+  if (first.reason === "size") {
+    message = t("formFileTooLarge", {
+      name: first.fileName,
+      actual: formatBytes(first.size),
+      limit: formatBytes(first.limit),
+    });
+  } else if (first.reason === "total") {
+    message = t("formTotalTooLarge", {
+      name: first.fileName,
+      actual: formatBytes(first.size),
+      total: formatBytes(first.total),
+      limit: formatBytes(first.limit),
+    });
+  } else if (first.reason === "count") {
+    message = t("formFileCountLimit", {
+      name: first.fileName,
+      current: first.current,
+      limit: first.limit,
+    });
+  } else {
+    message = t("formFileUnreadable", { name: first.fileName });
+  }
+  if (rejected.length === 1) return message;
+  return `${message} ${t("formFilesRejectedMore", { count: rejected.length - 1 })}`;
+}
+
+/** 把一个上传源分块写进 sidecar 暂存文件，并同步进度。 */
+async function stageUploadSource(file, source) {
+  let uploadId = "";
+  let lastPercent = -1;
+  try {
+    const begun = await host.invoke(
+      "http/upload/begin",
+      { fileName: file.fileName, size: Math.max(0, Number(source.size) || 0) },
+      { timeoutMs: 15000 },
+    );
+    uploadId = String(begun?.uploadId || "");
+    if (!uploadId) throw new Error("missing upload id");
+
+    let offset = 0;
+    for (;;) {
+      const chunk = await source.readChunk(offset, MULTIPART_UPLOAD_CHUNK);
+      const length = Math.max(0, Number(chunk.length) || 0);
+      if (length > 0) {
+        await host.invoke("http/upload/chunk", { uploadId, dataBase64: chunk.dataBase64 }, { timeoutMs: 15000 });
+        offset += length;
+        const percent = file.size > 0 ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
+        if (percent !== lastPercent) {
+          lastPercent = percent;
+          patchFormFile(file.id, { progress: percent });
+        }
+      }
+      if (chunk.eof) break;
+      if (length <= 0) throw new Error("empty chunk");
+    }
+
+    // 暂存期间行可能被删除 / 切换请求，此时内容已经没人要了。
+    if (!findFormFile(current().http.formRows, file.id)) {
+      void abortStagedUpload(uploadId);
+      return;
+    }
+    patchFormFile(file.id, { uploadId, size: offset || file.size, status: "ready", progress: 100 });
+  } catch {
+    if (uploadId) void abortStagedUpload(uploadId);
+    if (findFormFile(current().http.formRows, file.id)) {
+      patchFormFile(file.id, { status: "error", progress: 0 });
+      showToast(t("formFileStageFailed", { name: file.fileName }), "error");
+    }
+  } finally {
+    void source.close?.();
+  }
 }
 
 /** 建流时定死的参数；改了就等同于"需要重连"，直接结束当前会话。 */
@@ -532,7 +806,8 @@ export function appendKVOnEnter(scope, listName, index) {
 }
 
 export function setResponseTab(tab) {
-  update((s) => ({ ...s, responseTab: tab === "headers" ? "headers" : "body" }));
+  const next = tab === "headers" || tab === "request" ? tab : "body";
+  update((s) => ({ ...s, responseTab: next }));
   scheduleDraftPersist();
 }
 
@@ -718,6 +993,7 @@ export function formatGrpcMessage(index) {
 
 export function newRequest(folder) {
   const target = normalizeFolder(folder);
+  abortFormUploads(current().http.formRows);
   resetStreamSession("", false);
   update((s) => ({
     ...s,
@@ -1135,26 +1411,73 @@ export async function cancelCurrentRequest() {
   }
 }
 
-export async function sendHttp() {
-  const s = current();
-  if (s.sending || s.discovering || !host.available) return false;
-
+/**
+ * 校验 HTTP 表单并组装 `http/send` / `http/download/start` 共用的参数。
+ *
+ * 下载只是把响应写进本地文件，请求本身的合法性与发送完全一致，所以校验只保留一份：
+ * 两边各写一遍迟早会漂移出"能发不能下"这种怪现象。返回 null 表示校验没通过（提示已弹）。
+ */
+function buildHttpSendParams(s, { allowInvalidJson = false } = {}) {
   if (!s.http.url.trim()) {
     showToast(t("needUrl"), "warn");
-    return false;
+    return null;
   }
   const url = buildRequestUrl(s.http.url, s.http.params);
   if (!url) {
     showToast(t("invalidUrl"), "error");
-    return false;
+    return null;
   }
 
-  const headers = buildHeaders(s.http.headers, s.http.bodyType);
+  // 文件内容暂存在 sidecar 里：恢复自快照的文件只有元数据，必须重新选择后才能发。
+  if (s.http.bodyType === "multipart") {
+    const entries = formFileEntries(s.http.formRows);
+    if (entries.some((entry) => entry.file.status === "staging")) {
+      showToast(t("formFileStaging"), "warn");
+      return null;
+    }
+    const missing = entries.find((entry) => !entry.file.uploadId);
+    if (missing) {
+      showToast(t("formFileMissing", { name: missing.file.fileName }), "warn");
+      return null;
+    }
+    if (entries.length > MULTIPART_FILE_COUNT_LIMIT) {
+      showToast(t("formTooManyFiles", { limit: MULTIPART_FILE_COUNT_LIMIT }), "error");
+      return null;
+    }
+    const totalBytes = multipartTotalBytes(s.http.formRows);
+    if (totalBytes > MULTIPART_TOTAL_LIMIT) {
+      showToast(
+        t("formFilesTotalTooLarge", {
+          total: formatBytes(totalBytes),
+          limit: formatBytes(MULTIPART_TOTAL_LIMIT),
+        }),
+        "error",
+      );
+      return null;
+    }
+  }
+
+  // JSON 正文语法有问题时先拦住：发出去只会换一个 400，不如在这里定位到行列。
+  if (!allowInvalidJson && normalizeBodyType(s.http.bodyType) === "json") {
+    const issue = jsonIssue(s.http.bodyText);
+    if (issue) {
+      update((cur) => ({ ...cur, bodyIssue: issue }));
+      showToast(t("invalidJson"), "error");
+      return null;
+    }
+  }
+
+  const headers = buildHeaders(s.http.headers, httpContentType(s.http));
   const timeoutMs = clampNumber(s.http.timeoutMs, HTTP_TIMEOUT_DEFAULT, 1, TIMEOUT_MAX);
-  const bodyText = s.http.bodyType === "none" ? "" : s.http.bodyText;
-  if (byteLength(bodyText) > BRIDGE_BODY_LIMIT) {
+  const bodyParams = buildBodyParams(s.http);
+  if (byteLength(bodyParams.bodyText) > BRIDGE_BODY_LIMIT) {
     showToast(t("bodyTooLarge"), "error");
-    return false;
+    return null;
+  }
+  // 文件走分块暂存，但文本字段仍随 http/send 一次性过桥；字段过多/过长时提前拦。
+  if (bodyParams.multipart && byteLength(JSON.stringify(bodyParams.multipart.fields)) > BRIDGE_BODY_LIMIT) {
+    showToast(t("bodyTooLarge"), "error");
+    return null;
   }
 
   const payload = toSnapshot(s);
@@ -1162,12 +1485,28 @@ export async function sendHttp() {
     method: s.http.method,
     url,
     headers,
-    bodyEncoding: s.http.bodyType === "none" ? "none" : "text",
-    bodyText,
+    ...bodyParams,
     timeoutMs,
     followRedirects: s.http.followRedirects !== false,
     skipTlsVerify: Boolean(s.http.skipTlsVerify),
   };
+  return { params, payload };
+}
+
+/**
+ * 发送当前 HTTP 请求。
+ *
+ * `force` 用于「仍然发送」：跳过 JSON 语法校验，其余校验（URL、文件暂存、体积上限）
+ * 照旧——那些是发不出去的硬错误，不该被绕过。
+ */
+export async function sendHttp({ force = false } = {}) {
+  const s = current();
+  if (s.sending || s.discovering || !host.available) return false;
+
+  const built = buildHttpSendParams(s, { allowInvalidJson: force });
+  if (!built) return false;
+  const { params, payload } = built;
+  clearBodyIssue();
 
   const run = beginRun("http", "send");
   const started = performance.now();
@@ -1175,14 +1514,19 @@ export async function sendHttp() {
     const data = await host.invoke(
       "http/send",
       { ...params, requestId: run.id },
-      { timeoutMs: Math.min(118000, timeoutMs + 5000) },
+      { timeoutMs: Math.min(118000, params.timeoutMs + 5000) },
     );
     finishRun(run, { protocol: "http", kind: "done", data, elapsedMs: Math.round(performance.now() - started) });
   } catch (error) {
+    const message = errorMessage(error, t("requestFailed"));
+    if (message.includes("Upload has expired")) {
+      invalidateFormUploads();
+      showToast(t("formFileExpired"), "warn");
+    }
     finishRun(run, {
       protocol: "http",
       kind: "error",
-      error: errorMessage(error, t("requestFailed")),
+      error: message,
       errorKind: describeErrorKind(error),
       elapsedMs: Math.round(performance.now() - started),
     });
@@ -1191,6 +1535,233 @@ export async function sendHttp() {
     scheduleDraftPersist();
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// 把响应体流式保存为本地文件
+// ---------------------------------------------------------------------------
+//
+// 响应体大小未知（可能几百 MB），所以走「边收边写」：
+//   http/download/start  →  循环 { http/download/read → 宿主文件写入 }  →  finish
+// 内存里始终只有一块。取消走 http/download/cancel（不是 request/cancel）：它会立刻
+// 关掉底层连接，让阻塞中的 read 以 canceled 结束。
+
+/** 开始一次流式保存。复用 sending 表示"有请求在跑"，这样发送/调用都会被挡住。 */
+function beginDownload(downloadId, download) {
+  downloadSeq += 1;
+  const run = { id: downloadId, seq: downloadSeq };
+  activeDownload = run;
+  update((s) => ({ ...s, sending: true, download }));
+  return run;
+}
+
+function isCurrentDownload(run) {
+  return Boolean(activeDownload) && activeDownload.seq === run.seq;
+}
+
+/** 只改 download 这一层：每收一块都要更新进度，不该整份 state 重建。 */
+function patchDownload(run, patch) {
+  if (!isCurrentDownload(run)) return;
+  update((s) => (s.download ? { ...s, download: { ...s.download, ...patch } } : s));
+}
+
+/** 收尾一次下载。response 为 undefined 时保留原来的响应（成功 / 用户取消）。 */
+function finishDownload(run, response) {
+  if (!isCurrentDownload(run)) return;
+  activeDownload = null;
+  update((s) => ({
+    ...s,
+    sending: false,
+    download: null,
+    ...(response === undefined ? {} : { response }),
+  }));
+}
+
+/** 尽力关掉后端的下载会话；失败一律忽略（会话可能已经结束）。 */
+async function cancelBackendDownload(downloadId) {
+  if (!downloadId || !host.available) return;
+  try {
+    await host.invoke("http/download/cancel", { downloadId }, { timeoutMs: CANCEL_RPC_TIMEOUT_MS });
+  } catch {
+    // 会话可能已经收尾；这里没有需要恢复的用户可见状态。
+  }
+}
+
+/**
+ * 把当前 HTTP 请求的响应体保存成本地文件。
+ *
+ * 成功时返回 true；用户取消、宿主不支持或请求失败都是 false，其中真正的失败会写进
+ * response（和发送失败一样在响应面板里展示），取消只给一条轻提示。
+ */
+export async function downloadResponse() {
+  const s = current();
+  if (s.sending || s.discovering || !host.available) return false;
+  // 下载只对 HTTP 有意义：gRPC 的响应不是一条可以用 Content-Length 描述的字节流。
+  if (s.protocol !== "http") return false;
+
+  const built = buildHttpSendParams(s);
+  if (!built) return false;
+
+  if (!host.canSaveFiles()) {
+    showToast(t("downloadUnsupported"), "warn");
+    return false;
+  }
+
+  const { params, payload } = built;
+  const downloadId = uid();
+  const run = beginDownload(downloadId, {
+    // start 返回前先用 URL 猜个名字，避免进度条上什么文件名都没有。
+    fileName: fileNameFromUrl(params.url),
+    contentType: "",
+    receivedBytes: 0,
+    totalBytes: -1,
+    canceling: false,
+  });
+
+  const started = performance.now();
+  /** @type {Awaited<ReturnType<typeof host.createFileSink>>} */
+  let sink = null;
+  let fileName = "";
+  let received = 0;
+  let error = null;
+  /** ok | canceled | error */
+  let outcome = "ok";
+  /** 宿主保存对话框里点了取消：不算错误，也不要提示（用户已经知道结果）。 */
+  let silent = false;
+
+  try {
+    const data = await host.invoke(
+      "http/download/start",
+      { ...params, downloadId },
+      { timeoutMs: Math.min(118000, params.timeoutMs + 5000) },
+    );
+
+    if (!isCurrentDownload(run)) {
+      // 期间已经被取消 / 被新请求取代：后端会话已经建好，必须自己关掉。
+      await cancelBackendDownload(downloadId);
+      silent = true;
+      outcome = "canceled";
+      return false;
+    }
+
+    const contentLength = Number(data?.contentLength);
+    const totalBytes = Number.isFinite(contentLength) && contentLength > 0 ? Math.round(contentLength) : -1;
+    fileName = String(data?.fileName || "") || current().download?.fileName || "";
+    patchDownload(run, { fileName, contentType: String(data?.contentType || ""), totalBytes });
+
+    // 保存对话框还没弹出来就被取消：不要再弹对话框，也不该继续拉数据。
+    if (current().download?.canceling) {
+      outcome = "canceled";
+      return false;
+    }
+
+    sink = await host.createFileSink({
+      name: data?.fileName,
+      contentType: data?.contentType,
+      size: contentLength,
+    });
+    if (!sink) {
+      // 宿主不支持，或用户在系统保存对话框里取消了：后端会话要立刻关掉。
+      silent = true;
+      outcome = "canceled";
+      return false;
+    }
+    // 用户在保存对话框期间点了取消：句柄已经拿到，但这一次不该再继续收数据。
+    if (current().download?.canceling) {
+      outcome = "canceled";
+      return false;
+    }
+
+    const maxBytes = sink.chunkBytes || DOWNLOAD_CHUNK_DEFAULT;
+    while (isCurrentDownload(run)) {
+      const read = await host.invoke(
+        "http/download/read",
+        { downloadId, maxBytes },
+        // 桥接超时要比 sidecar 的读空闲超时更宽松：让后端先判定"卡住"并回收会话，
+        // 我们拿到的就是带 kind=timeout 的明确错误，而不是桥接层笼统的调用超时。
+        { timeoutMs: DOWNLOAD_READ_TIMEOUT_MS + 5000 },
+      );
+      if (!isCurrentDownload(run)) break;
+      const base64 = typeof read?.dataBase64 === "string" ? read.dataBase64 : "";
+      // 空块且 eof 是合法的（0 字节响应）；空块且非 eof 不该出现，继续等下一块即可。
+      if (base64) received += await sink.write(base64);
+      // 后端给的是累计已收字节：比本地计数更接近真实进度，取两者的最大值。
+      const reported = Number(read?.receivedBytes);
+      patchDownload(run, { receivedBytes: Number.isFinite(reported) && reported > received ? reported : received });
+      if (read?.eof) break;
+    }
+    if (!isCurrentDownload(run)) {
+      outcome = "canceled";
+      return false;
+    }
+  } catch (caught) {
+    error = caught;
+    outcome = "error";
+  } finally {
+    if (sink) {
+      if (outcome === "ok") {
+        try {
+          await sink.finish();
+        } catch (finishError) {
+          error = finishError;
+          outcome = "error";
+        }
+      }
+      if (outcome !== "ok") await sink.cancel();
+    }
+    // 只要没成功落盘，后端那边都可能还留着会话；取消是幂等的，重复调没有副作用。
+    if (outcome !== "ok") await cancelBackendDownload(downloadId);
+
+    // read 被 http/download/cancel 打断时会报 canceled；用户点取消也走这条路径。
+    const canceledByUser = current().download?.canceling === true;
+    if (outcome === "error" && (canceledByUser || describeErrorKind(error) === "canceled")) {
+      outcome = "canceled";
+    }
+
+    finishDownload(
+      run,
+      outcome === "error"
+        ? {
+            protocol: "http",
+            kind: "error",
+            error: errorMessage(error, t("requestFailed")),
+            errorKind: describeErrorKind(error),
+            elapsedMs: Math.round(performance.now() - started),
+          }
+        : undefined,
+    );
+
+    if (outcome === "ok") {
+      showToast(t("downloadSaved", { name: fileName || DOWNLOAD_FALLBACK_NAME, size: formatBytes(received) }), "ok");
+    } else if (outcome === "canceled" && !silent) {
+      showToast(t("downloadCanceled"), "warn");
+    }
+
+    await addHistory(payload);
+    scheduleDraftPersist();
+  }
+  return outcome === "ok";
+}
+
+/**
+ * 取消正在进行的下载。
+ *
+ * 只发 http/download/cancel 让阻塞中的 read 立刻返回；真正的状态收尾由 downloadResponse
+ * 自己做（它才知道已经写了多少、要不要保留旧响应）。不弹错误。
+ */
+export async function cancelDownload() {
+  const s = current();
+  const run = activeDownload;
+  if (!run || !s.download || s.download.canceling || !host.available) return false;
+
+  update((st) => (st.download ? { ...st, download: { ...st.download, canceling: true } } : st));
+  try {
+    await host.invoke("http/download/cancel", { downloadId: run.id }, { timeoutMs: CANCEL_RPC_TIMEOUT_MS });
+    return true;
+  } catch {
+    // 会话可能刚好已经结束：原 read 会自己返回，界面不需要额外提示。
+    return false;
+  }
 }
 
 function grpcBaseParams(s) {
@@ -1845,6 +2416,22 @@ function flushStreamOnUnload() {
   }
 }
 
+/**
+ * 页面即将销毁时尽力关掉正在进行的下载。
+ *
+ * 和流会话同理：不清理的话 sidecar 会一直攥着响应体直到空闲 TTL（2 分钟），
+ * 期间连接和内存都白占着。这里同样不 await、失败忽略，正确性靠 TTL 兜底。
+ */
+function flushDownloadOnUnload() {
+  const run = activeDownload;
+  if (!run || !host.available) return;
+  try {
+    void host.invoke("http/download/cancel", { downloadId: run.id }, { timeoutMs: 2000 });
+  } catch {
+    // 宿主已不可用，交给 TTL。
+  }
+}
+
 let unloadCleanupInstalled = false;
 
 /**
@@ -1861,6 +2448,7 @@ export function installStreamUnloadCleanup() {
   const onPageHide = (event) => {
     if (event?.persisted) return;
     flushStreamOnUnload();
+    flushDownloadOnUnload();
   };
   window.addEventListener("pagehide", onPageHide);
 
