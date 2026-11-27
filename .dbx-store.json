@@ -4,10 +4,10 @@
   "icon": "assets/plugin.svg",
   "tags": ["api", "http", "grpc", "testing"],
   "permissions": ["host.storage"],
-  "source": "https://github.com/MosaicAccount/dbx-plugin-api-tester/tree/v0.1.2",
+  "source": "https://github.com/MosaicAccount/dbx-plugin-api-tester/tree/v0.1.3",
   "homepage": "https://github.com/MosaicAccount/dbx-plugin-api-tester",
   "license": "MIT",
-  "releaseNotes": "gRPC server, client and bidirectional streaming can now run as interactive sessions: connect, send messages one by one, finish sending and follow replies as they arrive. Streams end with an explicit status and the full error message, connections stay alive while idle, and sessions are released when you switch methods or close the tab.",
+  "releaseNotes": "Form and Multipart Form are now separate request body types sharing one text/file row editor: upload files directly, several per field name, streamed to the sidecar in chunks (1 GB per file, 5 GB total), with Content-Type and boundary generated when sending. Binary responses and Content-Disposition attachments download while they stream, unaffected by the display limit, with a real total size, a cancel action, and no save for non-2xx. A new Actual Request tab shows exactly what was sent; JSON bodies are validated before sending with line and column; text bodies default to charset=utf-8; binary responses render as a file card instead of base64.",
   "localizations": {
     "zh-CN": {
       "name": "API 调试台",
