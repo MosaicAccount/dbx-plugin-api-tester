@@ -106,7 +106,6 @@
       <div class="panel-row">
         <button class="btn btn-ghost btn-sm" type="button" onclick={() => patchHttp({ headers: [...http.headers, blankKV()] })}>{t("addHeader")}</button>
       </div>
-      <p class="hint">{t("headerHint")}</p>
     </div>
   {:else if tab === "body"}
     <!-- 请求体编辑器都吃满剩余高度：代码编辑器整块滚动，表单在行列表内滚动。 -->
