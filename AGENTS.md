@@ -229,8 +229,9 @@ dbx-plugin package .
   已上传包的 `sha256`/`size`，已有的 sidecar 只校验不覆盖。不要手工 `gh release upload` 补，
   也不要绕过脚本改这两个字段——脚本失败就说明 Release 本身有问题。
 - **`.dbx-store.json` 的读写约定**：商店同步按 Release 的 **tag** 读取该文件，`source` 应指向
-  当期 tag，内容与版本同步规则见上一条。`releaseNotes` 只能写英文基线——`localizations`
-  只接受 `name` / `description`，写别的字段会被 `validate.mjs` 拒绝。
+  当期 tag；更新日志的内容与同步规则见「Release 说明与商店更新日志同源」。`releaseNotes`
+  只能写英文基线——`localizations` 只接受 `name` / `description`，写别的字段会被
+  `validate.mjs` 拒绝。
 - **商店目录在 `t8y2/dbx-store`**：候选文件是 `candidates/<plugin-id>.json`，首次上架还要
   `publishers/<publisher-id>.json`；登记在 `automation/plugin-sources.json` 里
   `autoUpdate: true` 的仓库由每小时同步自动开候选 PR，首次或改展示字段才手工提。
