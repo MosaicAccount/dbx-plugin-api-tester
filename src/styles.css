@@ -1266,7 +1266,8 @@ textarea {
 
 .tabs--response {
   margin-top: 0;
-  padding: 0 16px;
+  /* 没有徽标/统计时上面那行要收起，标签行自己留出上边距，避免贴着面板上沿。 */
+  padding: 8px 16px 0;
 }
 
 .tab {
@@ -2067,15 +2068,9 @@ textarea {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 16px 6px;
-}
-
-.response-title {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  /* 只有徽标和统计的一行：左内边距对齐首个标签文字（16px + 10px），
+     底部留白交给标签行，两行之间才不会忽宽忽窄。 */
+  padding: 10px 16px 0 26px;
 }
 
 .response-badges {

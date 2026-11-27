@@ -5,7 +5,7 @@
    * 四种状态：空 / 加载中 / 出错 / 完成。完成态再按协议分 HTTP 与 gRPC 两套渲染。
    * 徽标（状态码、耗时、大小、截断等）由这里统一生成，避免各分支各写一遍。
    */
-  import { highlightJSON, presentBody, prettyJSON } from "../lib/format.js";
+  import { highlightJSON, presentBody, prettyJSON, responseText } from "../lib/format.js";
   import {
     ERROR_HINT_KEYS,
     dispositionFileName,
@@ -252,6 +252,23 @@
    */
   const showDownloadChip = $derived(downloadable && !binaryFile);
 
+  /**
+   * 顶部只有徽标和统计时有意义：没有响应就直接把整行收掉，
+   * 否则标签栏上方会空出一条只剩「复制」的横条。
+   */
+  const hasStatusRow = $derived(
+    Boolean(response) &&
+      (response.kind === "loading" ||
+        response.kind === "error" ||
+        httpBadges.length > 0 ||
+        httpMeta.length > 0 ||
+        grpcBadges.length > 0 ||
+        grpcMeta.length > 0),
+  );
+
+  /** 没有正文可复制时禁用按钮，比点一下再弹「没有可复制的内容」更直接。 */
+  const canCopy = $derived(Boolean(responseText(response)));
+
   /** gRPC 调用失败但拿到了 status 时，同样给一条排错提示。 */
   const grpcHint = $derived.by(() => {
     const data = response?.data;
@@ -282,33 +299,32 @@
 </script>
 
 <section class="response">
-  <div class="response-head">
-    <span class="response-title">{t("response")}</span>
-    <span class="response-badges">
-      {#if response?.kind === "loading"}
-        <span class="pill pill--info">{t("loading")}</span>
-      {:else if response?.kind === "error"}
-        {#if response.errorKind === "canceled"}
-          <span class="pill pill--warn">{t("canceledBadge")}</span>
-        {:else}
-          <span class="pill pill--err">{failureLabel}</span>
+  {#if hasStatusRow}
+    <div class="response-head">
+      <span class="response-badges">
+        {#if response?.kind === "loading"}
+          <span class="pill pill--info">{t("loading")}</span>
+        {:else if response?.kind === "error"}
+          {#if response.errorKind === "canceled"}
+            <span class="pill pill--warn">{t("canceledBadge")}</span>
+          {:else}
+            <span class="pill pill--err">{failureLabel}</span>
+          {/if}
+          {#if Number.isFinite(response.elapsedMs)}<span class="meta">{response.elapsedMs} ms</span>{/if}
+        {:else if response?.protocol === "http"}
+          {#each httpBadges as badge (badge.text)}
+            <span class="pill pill--{badge.tone}" title={badge.title}>{badge.text}</span>
+          {/each}
+          {#each httpMeta as item (item)}<span class="meta">{item}</span>{/each}
+        {:else if response?.protocol === "grpc"}
+          {#each grpcBadges as badge (badge.text)}
+            <span class="pill pill--{badge.tone}">{badge.text}</span>
+          {/each}
+          {#each grpcMeta as item (item)}<span class="meta">{item}</span>{/each}
         {/if}
-        {#if Number.isFinite(response.elapsedMs)}<span class="meta">{response.elapsedMs} ms</span>{/if}
-      {:else if response?.protocol === "http"}
-        {#each httpBadges as badge (badge.text)}
-          <span class="pill pill--{badge.tone}" title={badge.title}>{badge.text}</span>
-        {/each}
-        {#each httpMeta as item (item)}<span class="meta">{item}</span>{/each}
-      {:else if response?.protocol === "grpc"}
-        {#each grpcBadges as badge (badge.text)}
-          <span class="pill pill--{badge.tone}">{badge.text}</span>
-        {/each}
-        {#each grpcMeta as item (item)}<span class="meta">{item}</span>{/each}
-      {/if}
-    </span>
-    <span class="grow"></span>
-    <button class="btn btn-ghost btn-sm" type="button" onclick={() => void copyResponse()}>{t("copy")}</button>
-  </div>
+      </span>
+    </div>
+  {/if}
 
   <div class="tabs tabs--response">
     <button class="tab" class:is-active={responseTab === "body"} type="button" onclick={() => setResponseTab("body")}>
@@ -324,33 +340,59 @@
       </button>
     {/if}
     <span class="grow"></span>
-    {#if showDownloadChip}
-      <!-- 文件响应才给下载入口：图标和文件大小合成一个 chip，避免一个图标孤零零地
-           挨着一段小字，两者也不用各自猜垂直中心。 -->
+    <!-- 面板级动作都收在标签行右侧：下载（带大小）和复制各占一个 chip，视觉重量一致。 -->
+    <span class="tabs-actions">
+      {#if showDownloadChip}
+        <!-- 文件响应才给下载入口：图标和文件大小合成一个 chip，避免一个图标孤零零地
+             挨着一段小字，两者也不用各自猜垂直中心。 -->
+        <button
+          class="panel-chip"
+          type="button"
+          aria-label={downloadFileSize ? t("downloadFileWithSize", { size: downloadFileSize }) : t("downloadFile")}
+          title={downloadFileSize ? t("downloadFileWithSize", { size: downloadFileSize }) : t("downloadFile")}
+          disabled={!canDownload}
+          onclick={() => void downloadResponse()}
+        >
+          <svg viewBox="0 0 14 14" width="14" height="14" fill="none" aria-hidden="true">
+            <path
+              d="M7 2.2v6.1m0 0 2.3-2.3M7 8.3 4.7 6"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path d="M2.4 9.6v1.5c0 .4.3.7.7.7h7.8c.4 0 .7-.3.7-.7V9.6" stroke="currentColor" stroke-width="1.5"
+              stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          {#if downloadFileSize}
+            <span class="panel-chip-size">{downloadFileSize}</span>
+          {/if}
+        </button>
+      {/if}
       <button
-        class="download-chip"
+        class="panel-chip panel-chip--icon"
         type="button"
-        aria-label={downloadFileSize ? t("downloadFileWithSize", { size: downloadFileSize }) : t("downloadFile")}
-        title={downloadFileSize ? t("downloadFileWithSize", { size: downloadFileSize }) : t("downloadFile")}
-        disabled={!canDownload}
-        onclick={() => void downloadResponse()}
+        aria-label={t("copy")}
+        title={t("copy")}
+        disabled={!canCopy}
+        onclick={() => void copyResponse()}
       >
-        <svg viewBox="0 0 14 14" width="14" height="14" fill="none" aria-hidden="true">
-          <path
-            d="M7 2.2v6.1m0 0 2.3-2.3M7 8.3 4.7 6"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-          <path d="M2.4 9.6v1.5c0 .4.3.7.7.7h7.8c.4 0 .7-.3.7-.7V9.6" stroke="currentColor" stroke-width="1.5"
-            stroke-linecap="round" stroke-linejoin="round" />
+        <svg
+          viewBox="0 0 24 24"
+          width="13"
+          height="13"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <rect x="9" y="9" width="12" height="12" rx="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
         </svg>
-        {#if downloadFileSize}
-          <span class="download-chip-size">{downloadFileSize}</span>
-        {/if}
       </button>
-    {/if}
+    </span>
   </div>
 
   <div class="response-body">
@@ -1072,10 +1114,21 @@
     overflow-wrap: anywhere;
   }
 
-  /* 下载入口：图标和文件大小合成一个 chip，和 tab 行共用一套圆角与边框。 */
-  .download-chip {
+  /*
+   * 标签行右侧的面板级动作 chip：下载与复制共用一套边框/圆角/悬停，
+   * 免得标题旁一个文字按钮、标签行里一个带框按钮，两种按钮风格打架。
+   */
+  .tabs-actions {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .panel-chip {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
     height: 26px;
     padding: 0 10px;
@@ -1090,30 +1143,30 @@
       background-color 0.12s ease;
   }
 
-  .download-chip:hover {
+  /* 纯图标 chip 收成正方形：没有文字就不要留两侧的横向内边距。 */
+  .panel-chip--icon {
+    width: 26px;
+    padding: 0;
+  }
+
+  .panel-chip:hover:not(:disabled) {
     border-color: color-mix(in srgb, var(--fg) 24%, transparent);
     background: color-mix(in srgb, var(--fg) 7%, transparent);
     color: var(--fg);
   }
 
-  .download-chip:focus-visible {
+  .panel-chip:focus-visible {
     outline: none;
     border-color: var(--primary);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 22%, transparent);
   }
 
-  .download-chip:disabled {
+  .panel-chip:disabled {
     opacity: 0.45;
     cursor: not-allowed;
   }
 
-  .download-chip:disabled:hover {
-    border-color: var(--border);
-    background: color-mix(in srgb, var(--fg) 4%, transparent);
-    color: var(--muted);
-  }
-
-  .download-chip svg {
+  .panel-chip svg {
     flex: none;
   }
 
@@ -1217,7 +1270,7 @@
   }
 
   /* 大小是补充信息：始终比图标弱一档，悬停时也不跟着变亮。 */
-  .download-chip-size {
+  .panel-chip-size {
     color: var(--muted);
     font-family: var(--font-mono);
     font-size: 11px;
