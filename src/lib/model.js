@@ -54,6 +54,18 @@ export const STREAM_DURATION_DEFAULT = 1800000;
 export const STREAM_DURATION_MIN = 60000;
 export const STREAM_DURATION_MAX = 7200000;
 
+/**
+ * 把响应体流式保存到本地文件时的限额。
+ *
+ * 大小未知，所以走"边收边写"：每次从 sidecar 读一块、写一块，内存里只留一块。
+ * 读块大小以宿主 beginSave 返回的 chunkBytes 为准，缺省用 DOWNLOAD_CHUNK_DEFAULT。
+ */
+export const DOWNLOAD_CHUNK_DEFAULT = 256 * 1024;
+/** 单次 read 的等待上限；到点没有新数据后端会作废会话并返回 timeout。 */
+export const DOWNLOAD_READ_TIMEOUT_MS = 30000;
+/** 宿主没给出文件名时保存对话框用的兜底名。 */
+export const DOWNLOAD_FALLBACK_NAME = "download.bin";
+
 export const IS_MAC =
   typeof navigator === "undefined" ? false : /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
 export const SAVE_SHORTCUT = IS_MAC ? "⌘S" : "Ctrl+S";
@@ -707,6 +719,88 @@ export function statusTone(value) {
   return "ok";
 }
 
+/** 大小写不敏感地取一个响应头的值；取不到时返回空串。 */
+export function headerValue(headers, name) {
+  if (!Array.isArray(headers)) return "";
+  const wanted = String(name || "").toLowerCase();
+  for (const entry of headers) {
+    if (String(entry?.name || "").toLowerCase() === wanted) return String(entry?.value || "");
+  }
+  return "";
+}
+
+/** Content-Disposition 是否是「附件」：只有 attachment 才表示服务器在给文件。 */
+export function isAttachmentDisposition(value) {
+  return /^\s*attachment\b/i.test(String(value || ""));
+}
+
+/** 文件名只留最后一段，避免把 `../` 或 Windows 路径画到界面上。 */
+function displayFileName(value) {
+  return String(value || "")
+    .trim()
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .pop() || "";
+}
+
+/**
+ * 从 Content-Disposition 里取文件名，只用于界面展示。
+ *
+ * 优先 RFC 5987 的 `filename*`（带字符集和百分号编码），退回普通 `filename`；
+ * 解析不出来就返回空串，由调用方回落到 URL。
+ */
+export function dispositionFileName(value) {
+  const header = String(value || "");
+  if (!header) return "";
+  const encoded = /filename\*\s*=\s*([^;]+)/i.exec(header);
+  if (encoded) {
+    const raw = encoded[1].trim().replace(/^["']|["']$/g, "");
+    const parts = raw.split("'");
+    const payload = parts.length >= 3 ? parts.slice(2).join("'") : raw;
+    try {
+      return displayFileName(decodeURIComponent(payload));
+    } catch {
+      return displayFileName(payload);
+    }
+  }
+  const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(header);
+  if (!plain) return "";
+  return displayFileName(plain[1] ?? plain[2] ?? "");
+}
+
+/**
+ * 这次响应是不是一份文件。
+ *
+ * 判断只看响应本身：正文被判定为二进制，或服务器用 Content-Disposition: attachment
+ * 明确声明了附件。文本接口（JSON / HTML / 纯文本）不给下载入口——普通调试顺手把响应
+ * 存成文件，比「想下载时找不到按钮」更容易让人误会。
+ *
+ * 所以下载入口是「拿到响应之后」才出现的：请求发出前无从判断对方要返回什么。
+ */
+export function isDownloadResponse(response) {
+  if (!response || response.kind !== "done" || response.protocol !== "http") return false;
+  const data = response.data;
+  if (!data) return false;
+  if (data.bodyKind === "binary") return true;
+  return isAttachmentDisposition(headerValue(data.headers, "content-disposition"));
+}
+
+/**
+ * 文件响应的完整大小（字节）；判断不出来时返回 0。
+ *
+ * 优先读 `Content-Length`：正文可能在展示上限（3 MB）处被截断，`sizeBytes` 只是"读进
+ * 内存的长度"，而 `Content-Length` 是这次响应的真实总字节数——下载保存的就是这么多。
+ * 响应头里没有（chunked）时退回 `sizeBytes`，但只在正文没被截断时才可信：截断后它的
+ * 值是把上限，报出来会让人以为文件就这么大。
+ */
+export function responseFileSizeBytes(data) {
+  const declared = Number(headerValue(data?.headers, "content-length"));
+  if (Number.isFinite(declared) && declared > 0) return declared;
+  if (data?.truncated) return 0;
+  const received = Number(data?.sizeBytes);
+  return Number.isFinite(received) && received > 0 ? received : 0;
+}
+
 /**
  * 把一份快照叠加到当前请求状态上。
  *
@@ -945,6 +1039,27 @@ export function suggestName(payload, untitled) {
 }
 
 /**
+ * 从 URL 里猜一个下载文件名，只用于 start 返回之前的占位显示。
+ *
+ * 真正的文件名以 `http/download/start` 返回的 fileName（来自 Content-Disposition）为准；
+ * 这里猜不出来就返回空串，由界面回落到"下载中"。
+ */
+export function fileNameFromUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    const segment = parsed.pathname.split("/").filter(Boolean).pop() || "";
+    if (!segment) return "";
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
+  } catch {
+    return "";
+  }
+}
+
+/**
  * 把后端返回的错误映射成人话提示。
  *
  * 后端已经在 error.data.kind 里给出了分类，优先用它；没有 data 时退回关键词匹配，
@@ -975,6 +1090,8 @@ export const ERROR_HINT_KEYS = {
   connection: "hintConnect",
   auth: "hintAuth",
   proto: "hintProto",
+  // 下载专用的分类：非 2xx 由 download/start 直接 reject，响应体没有保存。
+  status: "hintStatus",
 };
 
 export function errorMessage(error, fallback) {

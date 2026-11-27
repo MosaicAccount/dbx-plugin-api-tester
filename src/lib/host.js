@@ -9,6 +9,8 @@
  * 没有 localStorage、没有 navigator.clipboard。所有跨边界操作都必须走宿主。
  */
 
+import { DOWNLOAD_CHUNK_DEFAULT, DOWNLOAD_FALLBACK_NAME } from "./model.js";
+
 /** @typedef {{ get: (key: string) => Promise<unknown>, set: (key: string, value: unknown) => Promise<boolean>, remove: (key: string) => Promise<void> }} PluginStorage */
 
 const plugin = typeof window === "undefined" ? undefined : window.dbxPlugin;
@@ -60,6 +62,20 @@ export async function copy(text) {
 /** 宿主是否提供原生文件选择（不提供时组件退回 `<input type="file">`）。 */
 export function canPickFiles() {
   return typeof plugin?.fileTransfer?.pick === "function";
+}
+
+/**
+ * 宿主是否支持把内容边收边写到本地文件。
+ *
+ * 这里只做能力探测、不做试探调用：`beginSave` 会弹出系统保存对话框，真到那一步
+ * 才发现不支持，用户已经等过一次交互了。能力位显式写成 false 的宿主也按不支持处理，
+ * 让按钮提前禁用而不是点了没反应。
+ */
+export function canSaveFiles() {
+  const transfer = plugin?.fileTransfer;
+  if (typeof transfer?.beginSave !== "function" || typeof transfer?.write !== "function") return false;
+  const caps = /** @type {{ fileTransfer?: { beginSave?: unknown } }} */ (capabilities());
+  return caps.fileTransfer?.beginSave !== false;
 }
 
 const FILE_CHUNK_BYTES = 256 * 1024;
@@ -242,6 +258,120 @@ export function browserUploadSource(file) {
       return { dataBase64: bytesToBase64(bytes), eof: end >= size, length: bytes.length };
     },
     async close() {},
+  };
+}
+
+/** 保存时单次写入的合法块大小；超出范围的宿主建议值按边界收敛。 */
+const SAVE_CHUNK_MIN = 64 * 1024;
+const SAVE_CHUNK_MAX = 1024 * 1024;
+
+/** base64 字符串解码后的字节数；用它判断"这一块是否写完了"，避免每次都真的解码。 */
+function base64ByteLength(data) {
+  const text = String(data || "");
+  const padding = text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((text.length * 3) / 4) - padding);
+}
+
+/**
+ * 打开一个「边收边写」的本地文件接收器。
+ *
+ * 响应体可能几百 MB，所以这里只负责把每一块交给宿主，绝不把内容留在内存里拼成整份
+ * 再写。返回 null 表示宿主不支持该能力，或用户在系统保存对话框里取消了选择——两种情况
+ * 对调用方都是"这次没有文件可写"，不需要区分。
+ *
+ * 返回值里的 `chunkBytes` 是给后端 `http/download/read` 用的单次读取上限：按宿主建议的
+ * 写入块大小去取数据，既不撑爆桥接消息，也不会为了攒大块而多占内存。
+ *
+ * @param {{ name?: string, contentType?: string, size?: number }} [descriptor]
+ * @returns {Promise<null | {
+ *   chunkBytes: number,
+ *   write: (base64: string) => Promise<number>,
+ *   finish: () => Promise<void>,
+ *   cancel: () => Promise<void>,
+ * }>}
+ */
+export async function createFileSink(descriptor = {}) {
+  const transfer = plugin?.fileTransfer;
+  if (!transfer) return null;
+  // 先把可选方法绑到对象上：后续回调里不能再依赖 TS 的属性收窄，也不能丢 this。
+  const beginSave = typeof transfer.beginSave === "function" ? transfer.beginSave.bind(transfer) : null;
+  const writeChunk = typeof transfer.write === "function" ? transfer.write.bind(transfer) : null;
+  const finishSave = typeof transfer.finish === "function" ? transfer.finish.bind(transfer) : null;
+  const cancelSave = typeof transfer.cancel === "function" ? transfer.cancel.bind(transfer) : null;
+  if (!beginSave || !writeChunk) return null;
+
+  const name = String(descriptor.name || "").trim() || DOWNLOAD_FALLBACK_NAME;
+  const contentType = String(descriptor.contentType || "");
+  const size = Number(descriptor.size);
+  /** @type {{ name: string, contentType?: string, size?: number }} */
+  const request = { name };
+  // 空 Content-Type 与未知大小都不要传给宿主：前者会被当成 "text/plain" 之类的默认值，
+  // 后者（-1）会让保存对话框显示一个错误的大小。
+  if (contentType) request.contentType = contentType;
+  if (Number.isFinite(size) && size > 0) request.size = Math.round(size);
+
+  const target = await beginSave(request);
+  if (!target || typeof target.handleId !== "string" || !target.handleId) return null;
+
+  const handleId = target.handleId;
+  const suggestedChunk = Number(target.chunkBytes);
+  const chunkBytes =
+    Number.isFinite(suggestedChunk) && suggestedChunk > 0
+      ? Math.min(SAVE_CHUNK_MAX, Math.max(SAVE_CHUNK_MIN, Math.round(suggestedChunk)))
+      : DOWNLOAD_CHUNK_DEFAULT;
+
+  let offset = Number(target.offset) > 0 ? Math.round(Number(target.offset)) : 0;
+  let closed = false;
+
+  return {
+    chunkBytes,
+
+    /**
+     * 写入一块 base64，返回实际写入的字节数。
+     *
+     * 宿主可能只吃下一部分（比如有自己的单次写入上限），所以按返回的 written / nextOffset
+     * 推进 offset，并把剩下的字节重新编码后接着写——宁可多一次 RPC，也不能丢数据。
+     * 只有当宿主真的只写了一半时才做解码/重编码，正常情况整块直传。
+     */
+    async write(base64) {
+      if (closed) return 0;
+      let data = String(base64 || "");
+      if (!data) return 0;
+      let writtenTotal = 0;
+      for (;;) {
+        const total = base64ByteLength(data);
+        if (total <= 0) return writtenTotal;
+        const result = await writeChunk(handleId, offset, data);
+        const reported = Number(result?.written);
+        const nextOffset = Number(result?.nextOffset);
+        let consumed = Number.isFinite(reported) && reported > 0 ? Math.round(reported) : total;
+        if (Number.isFinite(nextOffset) && nextOffset > offset) consumed = Math.round(nextOffset - offset);
+        if (consumed <= 0) throw new Error("The host rejected the file write");
+        consumed = Math.min(consumed, total);
+        offset += consumed;
+        writtenTotal += consumed;
+        if (consumed >= total) return writtenTotal;
+        data = bytesToBase64(decodeBase64(data).subarray(consumed));
+      }
+    },
+
+    /** 收尾落盘；重复调用是安全的。失败时不标记为已关闭，让调用方还能 cancel 掉句柄。 */
+    async finish() {
+      if (closed) return;
+      if (finishSave) await finishSave(handleId);
+      closed = true;
+    },
+
+    /** 放弃这次保存；重复调用是安全的，失败也不抛（句柄由宿主自己回收）。 */
+    async cancel() {
+      if (closed) return;
+      closed = true;
+      try {
+        await cancelSave?.(handleId);
+      } catch {
+        // 取消失败不影响已经展示给用户的状态。
+      }
+    },
   };
 }
 

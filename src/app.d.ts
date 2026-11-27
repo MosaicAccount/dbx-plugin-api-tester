@@ -16,6 +16,18 @@ interface DbxPluginFileHandle {
   contentType?: string;
 }
 
+/**
+ * 宿主「保存到本地文件」的目标句柄。
+ *
+ * 保存走 `beginSave` → 多次 `write` → `finish` 的增量写入，不会把整份内容放进内存；
+ * chunkBytes 是宿主建议的单次写入长度，offset 是宿主给出的续写起点。
+ */
+interface DbxPluginSaveTarget {
+  handleId: string;
+  chunkBytes?: number;
+  offset?: number;
+}
+
 /** 宿主注入到沙箱 iframe 的桥接对象。 */
 interface DbxPluginBridge {
   ready: Promise<unknown>;
@@ -36,6 +48,16 @@ interface DbxPluginBridge {
     read(handleId: string, offset: number, length?: number): Promise<{ dataBase64: string; length: number; eof: boolean }>;
     cancel?(handleId: string): Promise<unknown>;
     onDrop?(fn: (files: DbxPluginFileHandle[], meta?: Record<string, unknown>) => void): () => void;
+    /** 打开系统保存对话框并拿到可增量写入的句柄；用户取消时返回 null。 */
+    beginSave?(options: {
+      name: string;
+      contentType?: string;
+      size?: number;
+    }): Promise<DbxPluginSaveTarget | null>;
+    /** 从 offset 处写入一段 base64；返回实际写入的字节数与下一个写入位置。 */
+    write?(handleId: string, offset: number, dataBase64: string): Promise<{ written?: number; nextOffset?: number }>;
+    /** 收尾并落盘。 */
+    finish?(handleId: string): Promise<unknown>;
   };
   onContext?(fn: (context: Record<string, unknown>) => void): () => void;
   onEvent?(fn: (event: unknown) => void): () => void;

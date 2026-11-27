@@ -2110,6 +2110,82 @@ textarea {
   }
 }
 
+/*
+ * 流式保存进度：固定在响应体顶部，已经拿到的响应内容照旧显示在它下面。
+ * 总大小未知时（contentLength 为 -1）不编假进度，改用来回滑动的不确定态。
+ */
+.download-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--primary) 6%, var(--panel));
+}
+
+.download-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.download-name {
+  overflow: hidden;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 11.8px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-size {
+  flex: none;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.download-bar {
+  overflow: hidden;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+}
+
+.download-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  transition: width 0.2s ease-out;
+}
+
+/* 未知总大小：一小段进度条来回滑动，表示"还在收"，而不是停在某个百分比上。 */
+.download-bar.is-indeterminate .download-bar-fill {
+  width: 32%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .download-bar.is-indeterminate .download-bar-fill {
+    animation: download-slide 1.4s ease-in-out infinite;
+  }
+
+  @keyframes download-slide {
+    0% {
+      margin-left: -32%;
+    }
+    100% {
+      margin-left: 100%;
+    }
+  }
+}
+
 .code-block {
   overflow: auto;
   margin: 0;

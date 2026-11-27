@@ -619,6 +619,7 @@
             http={$appState.http}
             sending={$appState.sending}
             canceling={$appState.canceling}
+            download={$appState.download}
           />
         {:else}
           <GrpcRequestHead
@@ -673,6 +674,8 @@
           protocol={$appState.protocol}
           stream={$appState.stream}
           canceling={$appState.canceling}
+          download={$appState.download}
+          canDownload={host.canSaveFiles()}
         />
       </div>
     </main>

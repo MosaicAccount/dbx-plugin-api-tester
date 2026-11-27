@@ -3,7 +3,6 @@ package httptool
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -174,15 +173,7 @@ func SendWithUploads(ctx context.Context, params SendParams, uploads UploadResol
 		maxRedirects = maxRedirectsLimit
 	}
 
-	transport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
-	}
-	clonedTransport := transport.Clone()
-	clonedTransport.TLSClientConfig = &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: params.SkipTLSVerify,
-	}
+	clonedTransport := newHTTPTransport(params.SkipTLSVerify)
 	defer clonedTransport.CloseIdleConnections()
 
 	client := &http.Client{

@@ -27,9 +27,15 @@ const (
 	MethodUploadChunk   = "http/upload/chunk"
 	MethodUploadAbort   = "http/upload/abort"
 	MethodRequestCancel = "request/cancel"
-	MethodGRPCServices  = "grpc/services"
-	MethodGRPCMethods   = "grpc/methods"
-	MethodGRPCInvoke    = "grpc/invoke"
+
+	// 流式下载：响应体大小未知，Start 只等响应头，正文由 Read 逐块取。
+	// 前端拿到句柄后边收边写本地文件，因此这三条 RPC 都不受单次响应体上限约束。
+	MethodHTTPDownloadStart  = "http/download/start"
+	MethodHTTPDownloadRead   = "http/download/read"
+	MethodHTTPDownloadCancel = "http/download/cancel"
+	MethodGRPCServices       = "grpc/services"
+	MethodGRPCMethods        = "grpc/methods"
+	MethodGRPCInvoke         = "grpc/invoke"
 
 	MethodGRPCStreamOpen      = "grpc/stream/open"
 	MethodGRPCStreamSend      = "grpc/stream/send"
@@ -46,6 +52,9 @@ func Methods() []string {
 		MethodUploadChunk,
 		MethodUploadAbort,
 		MethodRequestCancel,
+		MethodHTTPDownloadStart,
+		MethodHTTPDownloadRead,
+		MethodHTTPDownloadCancel,
 		MethodGRPCServices,
 		MethodGRPCMethods,
 		MethodGRPCInvoke,
@@ -96,22 +105,25 @@ type UploadAbortResult struct {
 
 // Handler 持有分发所需的依赖。
 type Handler struct {
-	id       string
-	version  string
-	inflight *inflight.Registry
-	streams  *grpctool.StreamManager
-	uploads  *uploads.Store
+	id        string
+	version   string
+	inflight  *inflight.Registry
+	streams   *grpctool.StreamManager
+	uploads   *uploads.Store
+	downloads *httptool.DownloadManager
 }
 
 // New 构造分发器。id 与 version 必须与 manifest.json 一致，
 // 否则宿主会以 "Sidecar identity does not match manifest" 拒绝启动。
 func New(id, version string) *Handler {
+	uploadStore := uploads.NewStore()
 	return &Handler{
-		id:       id,
-		version:  version,
-		inflight: inflight.New(),
-		streams:  grpctool.NewStreamManager(),
-		uploads:  uploads.NewStore(),
+		id:        id,
+		version:   version,
+		inflight:  inflight.New(),
+		streams:   grpctool.NewStreamManager(),
+		uploads:   uploadStore,
+		downloads: httptool.NewDownloadManager(uploadStore),
 	}
 }
 
@@ -122,6 +134,9 @@ func (h *Handler) Close() {
 	}
 	if h.uploads != nil {
 		h.uploads.Close()
+	}
+	if h.downloads != nil {
+		h.downloads.CloseAll()
 	}
 }
 
@@ -182,6 +197,36 @@ func (h *Handler) Dispatch(method string, params json.RawMessage) (any, *apperr.
 			return nil, err
 		}
 		return &UploadAbortResult{Aborted: h.uploads.Abort(request.UploadID)}, nil
+
+	case MethodHTTPDownloadStart:
+		var request struct {
+			httptool.SendParams
+			DownloadID string `json:"downloadId"`
+		}
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		return h.downloads.Start(request.SendParams, request.DownloadID)
+
+	case MethodHTTPDownloadRead:
+		var request httptool.DownloadReadParams
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		return h.downloads.Read(request)
+
+	case MethodHTTPDownloadCancel:
+		var request struct {
+			DownloadID string `json:"downloadId"`
+		}
+		if err := decode(params, &request); err != nil {
+			return nil, err
+		}
+		id := strings.TrimSpace(request.DownloadID)
+		if id == "" {
+			return nil, apperr.Invalid("downloadId is required")
+		}
+		return &CancelResult{Canceled: h.downloads.Cancel(id)}, nil
 
 	case MethodRequestCancel:
 		var request struct {
