@@ -13,8 +13,10 @@
     HTTP_TIMEOUT_DEFAULT,
     TIMEOUT_MAX,
     BODY_TYPES,
+    bodyTypeSpec,
     blankKV,
     clampNumber,
+    normalizeBodyType,
     buildRequestUrl,
   } from "../lib/model.js";
   import { addFormRow, patchHttp, showToast } from "../lib/store.js";
@@ -36,23 +38,20 @@
     return buildRequestUrl(raw, http.params) || raw;
   });
   /**
-   * 请求体分组标题的图标（12×12 viewBox 的单条 path，由 SelectMenu 统一描边）。
-   * 图标只出现在组标题上，选项行保持纯文字，两者一眼能分开。
+   * 下拉选项全部来自注册表：分组标题的图标（12×12 viewBox 的单条 path，由 SelectMenu
+   * 统一描边）也挂在类型定义上，组标题与选项一眼能分开。
    */
-  const GROUP_ICON_FORM = "M2.5 2.4h7v7.2h-7zM4.5 5h3M4.5 7h2";
-  const GROUP_ICON_RAW = "M4.6 3.2 2.2 6l2.4 2.8M7.4 3.2 9.8 6 7.4 8.8";
-  const GROUP_ICON_OTHER = "M2.8 2.8h2.2v2.2h-2.2zM7 2.8h2.2v2.2h-2.2zM2.8 7h2.2v2.2h-2.2zM7 7h2.2v2.2h-2.2z";
-
-  // 按表单 / 原始 / 其他分组，和 Bruno 的请求体下拉保持一致。
-  const bodyTypeOptions = $derived([
-    { value: "form", label: t("form"), group: t("bodyGroupForm"), groupIcon: GROUP_ICON_FORM },
-    { value: "multipart", label: t("multipart"), group: t("bodyGroupForm"), groupIcon: GROUP_ICON_FORM },
-    { value: "json", label: "JSON", group: t("bodyGroupRaw"), groupIcon: GROUP_ICON_RAW },
-    { value: "text", label: t("text"), group: t("bodyGroupRaw"), groupIcon: GROUP_ICON_RAW },
-    { value: "xml", label: "XML", group: t("bodyGroupRaw"), groupIcon: GROUP_ICON_RAW },
-    { value: "none", label: t("bodyNone"), group: t("bodyGroupOther"), groupIcon: GROUP_ICON_OTHER },
-  ]);
-  const bodyType = $derived(BODY_TYPES.includes(http.bodyType) ? http.bodyType : "none");
+  const bodyTypeOptions = $derived(
+    BODY_TYPES.map((spec) => ({
+      value: spec.id,
+      label: spec.label || t(spec.labelKey),
+      group: t(spec.group),
+      groupIcon: spec.icon,
+    })),
+  );
+  const bodyType = $derived(normalizeBodyType(http.bodyType));
+  /** 当前类型的编辑器 / Content-Type 等行为都从这一份定义取。 */
+  const bodySpec = $derived(bodyTypeSpec(bodyType));
   // 占位提示跟着类型走：同一个编辑器在 JSON / 文本 / XML 下提示不一样。
   const bodyPlaceholder = $derived(
     bodyType === "json" ? t("bodyPlaceholderJson") : bodyType === "xml" ? t("bodyPlaceholderXml") : t("bodyPlaceholder"),
@@ -107,7 +106,7 @@
     <!-- 请求体编辑器都吃满剩余高度：代码编辑器整块滚动，表单在行列表内滚动。 -->
     <div
       class="tab-panel is-active"
-      class:tab-panel--fill={bodyType !== "none"}
+      class:tab-panel--fill={bodySpec.editor !== "none"}
     >
       <div class="panel-row">
         <SelectMenu
@@ -117,7 +116,7 @@
           onchange={(value) => patchHttp({ bodyType: value })}
         />
         <span class="grow"></span>
-        {#if bodyType === "form" || bodyType === "multipart"}
+        {#if bodySpec.editor === "kv" || bodySpec.editor === "multipart"}
           <button class="btn btn-ghost btn-sm" type="button" onclick={() => addFormRow("text")}>
             {t("formAddRow")}
           </button>
@@ -128,9 +127,9 @@
           </button>
         {/if}
       </div>
-      {#if bodyType === "none"}
+      {#if bodySpec.editor === "none"}
         <p class="hint">{t("noBodyHint")}</p>
-      {:else if bodyType === "form" || bodyType === "multipart"}
+      {:else if bodySpec.editor === "kv" || bodySpec.editor === "multipart"}
         <FormEditor {t} {http} />
       {:else}
         <CodeEditor

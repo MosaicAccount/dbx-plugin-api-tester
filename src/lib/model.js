@@ -71,14 +71,91 @@ export const IS_MAC =
 export const SAVE_SHORTCUT = IS_MAC ? "⌘S" : "Ctrl+S";
 export const SAVE_AS_SHORTCUT = IS_MAC ? "⇧⌘S" : "Ctrl+Shift+S";
 
-export const BODY_CONTENT_TYPES = {
-  json: "application/json",
-  text: "text/plain",
-  xml: "application/xml",
-  form: "application/x-www-form-urlencoded",
-};
+/**
+ * 请求体类型注册表：类型、下拉文案、编辑器种类、默认 Content-Type、能否自定义
+ * 都只有这一份定义。
+ *
+ * 以前这四件事分散在类型数组、Content-Type 映射、面板 if/else、序列化分支里，
+ * 加类型时漏掉任何一处就会出现「下拉有选项、界面没变化」——#11 就是这么来的。
+ * 新类型只需在数组里加一项，下拉、编辑器、Content-Type、序列化都会跟着走。
+ *
+ * editor 的取值决定用哪个编辑器与哪种序列化：
+ * - `none`     不发送正文
+ * - `raw`      JSON / 文本 / XML 共用的代码编辑器，正文来自 bodyText
+ * - `kv`       键值行编辑器，按 application/x-www-form-urlencoded 编码
+ * - `multipart` 文本字段 + 文件行，boundary 与 Content-Type 由 sidecar 生成
+ */
+export const BODY_TYPES = [
+  {
+    id: "form",
+    labelKey: "form",
+    group: "bodyGroupForm",
+    icon: "M2.5 2.4h7v7.2h-7zM4.5 5h3M4.5 7h2",
+    editor: "kv",
+    contentType: "application/x-www-form-urlencoded",
+    custom: true,
+  },
+  {
+    id: "multipart",
+    labelKey: "multipart",
+    group: "bodyGroupForm",
+    icon: "M2.5 2.4h7v7.2h-7zM4.5 5h3M4.5 7h2",
+    editor: "multipart",
+    // boundary 必须由 sidecar 生成，界面不给自定义入口。
+    contentType: "",
+    custom: false,
+    generated: true,
+  },
+  {
+    id: "json",
+    label: "JSON",
+    group: "bodyGroupRaw",
+    icon: "M4.6 3.2 2.2 6l2.4 2.8M7.4 3.2 9.8 6 7.4 8.8",
+    editor: "raw",
+    contentType: "application/json",
+    custom: true,
+  },
+  {
+    id: "text",
+    labelKey: "text",
+    group: "bodyGroupRaw",
+    icon: "M4.6 3.2 2.2 6l2.4 2.8M7.4 3.2 9.8 6 7.4 8.8",
+    editor: "raw",
+    contentType: "text/plain",
+    custom: true,
+  },
+  {
+    id: "xml",
+    label: "XML",
+    group: "bodyGroupRaw",
+    icon: "M4.6 3.2 2.2 6l2.4 2.8M7.4 3.2 9.8 6 7.4 8.8",
+    editor: "raw",
+    contentType: "application/xml",
+    custom: true,
+  },
+  {
+    id: "none",
+    labelKey: "bodyNone",
+    group: "bodyGroupOther",
+    icon: "M2.8 2.8h2.2v2.2h-2.2zM7 2.8h2.2v2.2h-2.2zM2.8 7h2.2v2.2h-2.2zM7 7h2.2v2.2h-2.2z",
+    editor: "none",
+    contentType: "",
+    custom: false,
+  },
+];
 
-export const BODY_TYPES = ["none", "json", "text", "xml", "form", "multipart"];
+/** 合法类型 id，按注册表顺序（也是下拉顺序）。 */
+export const BODY_TYPE_IDS = BODY_TYPES.map((type) => type.id);
+
+/** 取类型定义；未知值统一回退到「不发送正文」，调用方不必各自兜底。 */
+export function bodyTypeSpec(id) {
+  return BODY_TYPES.find((type) => type.id === id) || BODY_TYPES[BODY_TYPES.length - 1];
+}
+
+/** 把任意输入收敛成合法类型 id。 */
+export function normalizeBodyType(id) {
+  return BODY_TYPE_IDS.includes(id) ? id : "none";
+}
 export const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 export const PROTOCOLS = ["http", "grpc"];
 
@@ -527,8 +604,9 @@ export function collectFolders(folderIndex, savedIndex) {
   return [...folders].sort((a, b) => a.localeCompare(b));
 }
 
+/** 某个类型的默认 Content-Type（multipart 与 none 为空串）。 */
 export function contentTypeForBody(bodyType) {
-  return BODY_CONTENT_TYPES[bodyType] || "";
+  return bodyTypeSpec(normalizeBodyType(bodyType)).contentType;
 }
 
 /**
@@ -601,13 +679,11 @@ function decodeFormComponent(value) {
  * 请求头里应该补的 Content-Type。
  *
  * multipart 的 boundary 只有 sidecar 知道，这里返回空串、由后端设置；
- * 其余类型沿用固定映射。
+ * 其余类型取注册表里的默认值，none 没有正文也就没有 Content-Type。
  */
 export function httpContentType(http) {
-  const bodyType = BODY_TYPES.includes(http?.bodyType) ? http.bodyType : "none";
-  if (bodyType === "multipart") return "";
-  if (bodyType !== "form") return contentTypeForBody(bodyType);
-  return BODY_CONTENT_TYPES.form;
+  const spec = bodyTypeSpec(normalizeBodyType(http?.bodyType));
+  return spec.generated ? "" : spec.contentType;
 }
 
 /**
@@ -647,17 +723,17 @@ export function multipartPayload(rows) {
  * 发送前的体积校验留在 store。
  */
 export function buildBodyParams(http) {
-  const bodyType = BODY_TYPES.includes(http?.bodyType) ? http.bodyType : "none";
-  if (bodyType === "multipart") {
+  const spec = bodyTypeSpec(normalizeBodyType(http?.bodyType));
+  if (spec.editor === "multipart") {
     return { bodyEncoding: "multipart", bodyText: "", multipart: multipartPayload(http.formRows || []) };
   }
-  if (bodyType === "form") {
+  if (spec.editor === "kv") {
     const rows = (Array.isArray(http.formRows) ? http.formRows : []).filter((row) => row.kind !== "file");
     return { bodyEncoding: "text", bodyText: buildFormBody(rows) };
   }
   return {
-    bodyEncoding: bodyType === "none" ? "none" : "text",
-    bodyText: bodyType === "none" ? "" : http.bodyText,
+    bodyEncoding: spec.editor === "none" ? "none" : "text",
+    bodyText: spec.editor === "none" ? "" : http.bodyText,
   };
 }
 
@@ -862,7 +938,7 @@ export function applySnapshot(snapshot, settings) {
     followRedirects: http.followRedirects !== false,
     skipTlsVerify: Boolean(http.skipTlsVerify),
   };
-  if (!BODY_TYPES.includes(next.http.bodyType)) next.http.bodyType = "none";
+  next.http.bodyType = normalizeBodyType(next.http.bodyType);
 
   const grpc = snapshot.grpc && typeof snapshot.grpc === "object" ? snapshot.grpc : {};
   next.grpc = {
