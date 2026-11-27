@@ -1,6 +1,6 @@
 {
   "name": "com.jlian.apitester-ui",
-  "version": "0.1.2-SNAPSHOT",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Svelte workbench UI for the API Tester DBX plugin.",

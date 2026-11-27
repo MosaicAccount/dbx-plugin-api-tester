@@ -4,10 +4,10 @@
   "icon": "assets/plugin.svg",
   "tags": ["api", "http", "grpc", "testing"],
   "permissions": ["host.storage"],
-  "source": "https://github.com/MosaicAccount/dbx-plugin-api-tester/tree/v0.1.1",
+  "source": "https://github.com/MosaicAccount/dbx-plugin-api-tester/tree/v0.1.2",
   "homepage": "https://github.com/MosaicAccount/dbx-plugin-api-tester",
   "license": "MIT",
-  "releaseNotes": "gRPC services can be called from imported .proto files without server reflection, including client and bidirectional streaming. In-flight requests can be cancelled, default timeouts are configurable, and the history sidebar can be collapsed or resized.",
+  "releaseNotes": "gRPC server, client and bidirectional streaming can now run as interactive sessions: connect, send messages one by one, finish sending and follow replies as they arrive. Streams end with an explicit status and the full error message, connections stay alive while idle, and sessions are released when you switch methods or close the tab.",
   "localizations": {
     "zh-CN": {
       "name": "API 调试台",

@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "com.jlian.apitester",
   "name": "API Tester",
-  "version": "0.1.2-SNAPSHOT",
+  "version": "0.1.2",
   "publisher": "jlian",
   "description": "Test HTTP and gRPC APIs from a DBX workbench.",
   "icon": "assets/plugin.svg",
