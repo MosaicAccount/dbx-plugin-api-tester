@@ -55,8 +55,12 @@
         type="button"
         title={t("remove")}
         aria-label={t("remove")}
-        onclick={() => removeKV(scope, listName, index)}>×</button
+        onclick={() => removeKV(scope, listName, index)}
       >
+        <svg viewBox="0 0 11 11" width="11" height="11" fill="none" aria-hidden="true"
+          ><path d="M2.5 2.5l6 6M8.5 2.5l-6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg
+        >
+      </button>
     </div>
   {/each}
 </div>

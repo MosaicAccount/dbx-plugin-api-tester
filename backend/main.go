@@ -21,7 +21,7 @@ import (
 const (
 	// pluginID 与 pluginVersion 必须与 manifest.json 完全一致。
 	pluginID      = "com.jlian.apitester"
-	pluginVersion = "0.1.1"
+	pluginVersion = "0.1.2-SNAPSHOT"
 )
 
 // server 把分层后的分发器适配成 SDK 的 Handler 接口。

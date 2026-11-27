@@ -25,8 +25,8 @@ func TestPingReportsIdentityAndMethods(t *testing.T) {
 	if !ping.OK || ping.ID != "com.jlian.apitester" || ping.Version != "0.0.1" {
 		t.Fatalf("unexpected ping payload: %+v", ping)
 	}
-	if len(ping.Methods) != 5 {
-		t.Fatalf("expected 5 methods, got %v", ping.Methods)
+	if len(ping.Methods) != 10 {
+		t.Fatalf("expected 10 methods, got %v", ping.Methods)
 	}
 }
 
@@ -48,7 +48,18 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 func TestMalformedParamsReturnsInvalidParams(t *testing.T) {
 	handler := New("com.jlian.apitester", "0.0.1")
 
-	for _, method := range []string{MethodHTTPSend, MethodGRPCServices, MethodGRPCMethods, MethodGRPCInvoke, MethodRequestCancel} {
+	for _, method := range []string{
+		MethodHTTPSend,
+		MethodGRPCServices,
+		MethodGRPCMethods,
+		MethodGRPCInvoke,
+		MethodRequestCancel,
+		MethodGRPCStreamOpen,
+		MethodGRPCStreamSend,
+		MethodGRPCStreamWait,
+		MethodGRPCStreamHalfClose,
+		MethodGRPCStreamClose,
+	} {
 		_, err := handler.Dispatch(method, json.RawMessage(`{"timeoutMs":"not-a-number"}`))
 		if err == nil {
 			t.Fatalf("%s: expected an error", method)
@@ -178,5 +189,37 @@ func assertCanceledOutcome(t *testing.T, result any, err *apperr.Error) {
 	}
 	if err.Kind != apperr.KindCanceled {
 		t.Fatalf("expected canceled kind, got %q (%s)", err.Kind, err.Message)
+	}
+}
+
+// 会话方法在没有 streamId 时必须给出参数错误；close 是例外——幂等，未知 id 也成功。
+func TestStreamMethodsRequireStreamID(t *testing.T) {
+	handler := New("com.jlian.apitester", "0.0.1")
+	defer handler.Close()
+
+	for _, method := range []string{MethodGRPCStreamSend, MethodGRPCStreamWait, MethodGRPCStreamHalfClose} {
+		_, err := handler.Dispatch(method, json.RawMessage(`{}`))
+		if err == nil || err.Code != apperr.CodeInvalidParams {
+			t.Fatalf("%s: expected invalid-params for a missing streamId, got %#v", method, err)
+		}
+	}
+
+	result, err := handler.Dispatch(MethodGRPCStreamClose, json.RawMessage(`{"streamId":"missing"}`))
+	if err != nil {
+		t.Fatalf("close of an unknown stream must be idempotent: %v", err)
+	}
+	if result == nil {
+		t.Fatal("close should return an empty result")
+	}
+}
+
+// open 缺服务/方法时要在建连接之前拒绝。
+func TestStreamOpenRequiresMethod(t *testing.T) {
+	handler := New("com.jlian.apitester", "0.0.1")
+	defer handler.Close()
+
+	_, err := handler.Dispatch(MethodGRPCStreamOpen, json.RawMessage(`{}`))
+	if err == nil || err.Code != apperr.CodeInvalidParams {
+		t.Fatalf("expected invalid-params for a missing method, got %#v", err)
 	}
 }

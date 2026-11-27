@@ -9,7 +9,97 @@
   import { ERROR_HINT_KEYS, formatBytes, statusTone } from "../lib/model.js";
   import { cancelCurrentRequest, copyResponse, setResponseTab } from "../lib/store.js";
 
-  let { t, response = null, responseTab = "body", protocol = "http", canceling = false } = $props();
+  let {
+    t,
+    response = null,
+    responseTab = "body",
+    protocol = "http",
+    stream = null,
+    canceling = false,
+  } = $props();
+
+  /**
+   * 交互式会话期间，右栏显示的是「时间线」而不是一次性响应：
+   * 发出与收到按到达顺序排列，服务端的回复不挂在某条消息下面。
+   */
+  const timeline = $derived(Array.isArray(stream?.timeline) ? stream.timeline : []);
+  /** 会话还在（连接中/已连接/半关闭）时即使还没有消息也要显示时间线，避免看起来像"没发起请求"。 */
+  const streamActive = $derived(["connecting", "open", "halfClosed"].includes(stream?.state));
+  const showTimeline = $derived(protocol === "grpc" && (timeline.length > 0 || streamActive));
+  const streamStateLabel = $derived.by(() => {
+    switch (stream?.state) {
+      case "connecting":
+        return t("connecting");
+      case "open":
+        return stream?.kind === "server" ? t("streamReceiving") : t("streamOpen");
+      case "halfClosed":
+        // 客户端流是"等那一条响应"，双向流是"继续收"。
+        return stream?.kind === "client" ? t("streamWaitingReply") : t("streamHalfClosed");
+      case "ended":
+        return t("streamEnded");
+      case "error":
+        return t("streamError");
+      default:
+        return "";
+    }
+  });
+
+  // 等待回复时每秒刷新一次，让用户看到"已经等了多久"，而不是干等着转圈。
+  let now = $state(Date.now());
+  $effect(() => {
+    if (stream?.state !== "halfClosed") return;
+    const timer = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
+  const waitedSeconds = $derived(
+    stream?.waitingSince ? Math.max(0, Math.round((now - stream.waitingSince) / 1000)) : 0,
+  );
+
+  /** 顶部计数：发送 / 收到。服务端流没有"已发送"的概念，只显示收到的条数。 */
+  const counts = $derived.by(() => {
+    const sent = Number(stream?.outSeq) || 0;
+    const received = Number(stream?.inSeq) || 0;
+    // 服务端流的请求在 open 时随建流发出，不存在"已发送 N 条"的概念。
+    if (stream?.kind === "server") return received ? t("streamReceivedCount", { count: received }) : "";
+    if (sent && received) return t("streamCounts", { sent, received });
+    if (sent) return t("streamSentCount", { count: sent });
+    if (received) return t("streamReceivedCount", { count: received });
+    return "";
+  });
+
+  /** 时间线正文的语法高亮缓存：条目对象引用稳定，按对象缓存即可，避免每次重渲染都重新高亮。 */
+  const bodyCache = new Map();
+  /** 超过这个长度的正文不做高亮：逐字符扫描太贵，长消息直接按纯文本展示。 */
+  const HIGHLIGHT_LIMIT = 200000;
+
+  function bodyHTML(entry) {
+    if (bodyCache.has(entry)) return bodyCache.get(entry);
+    const text = String(entry.text ?? "");
+    let html = null;
+    if (text && text.length <= HIGHLIGHT_LIMIT) {
+      try {
+        html = highlightJSON(prettyJSON(text));
+      } catch {
+        html = null;
+      }
+    }
+    if (bodyCache.size > 800) bodyCache.clear();
+    bodyCache.set(entry, html);
+    return html;
+  }
+
+  /** 相对会话开始的时间：1 秒以内用毫秒，之后用秒并保留一位小数。 */
+  function formatAt(ms) {
+    const value = Number(ms) || 0;
+    if (value <= 0) return "";
+    if (value < 1000) return `${value} ms`;
+    return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)} s`;
+  }
+
+  /** 方向标签：发送用「发送」，收到用「收到」。 */
+  function entryTag(entry) {
+    return entry.type === "out" ? t("sendMessage") : t("streamReceived");
+  }
 
   // 响应面板必须用"响应"语义的标签：请求面板已经占用了「请求体 / 请求头」，
   // 这里沿用同一组文案会让人以为看到的是刚刚填的请求。
@@ -22,6 +112,20 @@
     const key = ERROR_HINT_KEYS[response.errorKind];
     return key ? t(key) : "";
   });
+
+  /**
+   * 解析 / 发现描述信息失败时不要写成「请求失败」：用户点的是「解析文件」，
+   * 面板却报告请求失败会让人以为调用已经发出去了。
+   */
+  const failureLabel = $derived(
+    t(
+      response?.action === "parse"
+        ? "parseFailed"
+        : response?.action === "discover"
+          ? "discoverFailed"
+          : "requestFailed",
+    ),
+  );
 
   const httpBadges = $derived.by(() => {
     const data = response?.data;
@@ -103,7 +207,7 @@
         {#if response.errorKind === "canceled"}
           <span class="pill pill--warn">{t("canceledBadge")}</span>
         {:else}
-          <span class="pill pill--err">{t("requestFailed")}</span>
+          <span class="pill pill--err">{failureLabel}</span>
         {/if}
         {#if Number.isFinite(response.elapsedMs)}<span class="meta">{response.elapsedMs} ms</span>{/if}
       {:else if response?.protocol === "http"}
@@ -132,7 +236,77 @@
   </div>
 
   <div class="response-body">
-    {#if !response}
+    {#if showTimeline}
+      <div class="timeline" role="log" aria-live="polite" aria-label={t("response")}>
+        <div class="timeline-head">
+          <span class="timeline-dot" data-tone={stream?.state === "error" ? "err" : stream?.state === "ended" ? "done" : "live"} aria-hidden="true"></span>
+          <span class="timeline-state" data-tone={stream?.state === "error" ? "err" : stream?.state === "ended" ? "done" : "live"}>
+            {streamStateLabel}
+          </span>
+          {#if stream?.kind}
+            <span class="timeline-kind">{stream.kind === "server" ? t("serverStreaming") : stream.kind === "bidi" ? t("bidiStreaming") : t("clientStreaming")}</span>
+          {/if}
+          {#if counts}
+            <span class="timeline-counts">{counts}</span>
+          {/if}
+          <span class="grow"></span>
+          {#if stream?.state === "halfClosed" && waitedSeconds > 0}
+            <span class="timeline-wait">{t("streamWaitedSeconds", { seconds: waitedSeconds })}</span>
+          {/if}
+          {#if stream?.dropped > 0}
+            <span class="pill pill--warn">{t("streamDropped", { count: stream.dropped })}</span>
+          {/if}
+        </div>
+
+        {#if timeline.length === 0}
+          <!-- 连接状态已经在上面的头部行里，这里只说明"还没有消息"，不再重复"已连接"。 -->
+          <p class="timeline-empty">
+            {stream?.kind === "server" ? t("streamWaitingPush") : t("streamNoMessages")}
+          </p>
+        {:else}
+          <ol class="timeline-list">
+            {#each timeline as entry, index (index)}
+              <li class="tl-item" data-type={entry.type}>
+                {#if entry.type === "note"}
+                  <div class="tl-note">{entry.text}</div>
+                {:else if entry.type === "status"}
+                  <!-- 终态不是一条消息：不套消息卡，也不用竖条，只做时间线的收尾行。 -->
+                  <div class="tl-final" data-ok={String(Boolean(entry.ok))}>
+                    <div class="tl-final-head">
+                      <span class="tl-tag" data-type={entry.ok ? "status" : "error"}>
+                        {entry.ok ? t("streamStatusOk") : t("streamStatusFailed")}
+                      </span>
+                      <span class="tl-final-code">{entry.status?.name || "status"}</span>
+                      <span class="grow"></span>
+                      {#if entry.at}<span class="tl-time">{formatAt(entry.at)}</span>{/if}
+                    </div>
+                    <!-- 错误原因经常是一整句（transport / connection / desc=…），单独一行换行展示。 -->
+                    {#if entry.text}<p class="tl-final-msg">{entry.text}</p>{/if}
+                  </div>
+                {:else}
+                  <div class="tl-card" data-type={entry.type}>
+                    <div class="tl-head">
+                      <span class="tl-tag" data-type={entry.type}>{entryTag(entry)}</span>
+                      <span class="tl-seq">#{entry.seq}</span>
+                      <span class="grow"></span>
+                      {#if entry.at}<span class="tl-time">{formatAt(entry.at)}</span>{/if}
+                    </div>
+                    {#if entry.text}
+                      {@const html = bodyHTML(entry)}
+                      {#if html}
+                        <pre class="tl-code">{@html html}</pre>
+                      {:else}
+                        <pre class="tl-code is-plain">{entry.text}</pre>
+                      {/if}
+                    {/if}
+                  </div>
+                {/if}
+              </li>
+            {/each}
+          </ol>
+        {/if}
+      </div>
+    {:else if !response}
       <div class="response-empty">
         <strong>{t("emptyResponse")}</strong>
         <span>{t("emptyResponseHint")}</span>
@@ -155,7 +329,7 @@
     {:else if response.kind === "error"}
       <div class="response-error">
         <div class="response-error-title">
-          {response.errorKind === "canceled" ? t("requestCanceled") : t("requestFailed")}
+          {response.errorKind === "canceled" ? t("requestCanceled") : failureLabel}
         </div>
         {#if response.errorKind !== "canceled"}
           <pre class="response-error-code">{response.error}</pre>
@@ -256,6 +430,270 @@
 {/snippet}
 
 <style>
+  /* 会话时间线：一条消息一张卡片，和一元响应的代码块保持同一套观感。 */
+  .timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    height: 100%;
+    padding: 12px 14px 16px;
+    overflow: auto;
+  }
+
+  .timeline-head {
+    position: sticky;
+    top: -12px;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: -12px -14px 0;
+    padding: 10px 14px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+
+  .timeline-dot {
+    width: 7px;
+    height: 7px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+
+  .timeline-dot[data-tone="live"] {
+    background: var(--success);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 18%, transparent);
+  }
+
+  .timeline-dot[data-tone="err"] {
+    background: var(--danger);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .timeline-dot[data-tone="live"] {
+      animation: tl-pulse 2.4s ease-in-out infinite;
+    }
+
+    @keyframes tl-pulse {
+      0%,
+      100% {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.4;
+      }
+    }
+  }
+
+  .timeline-state {
+    font-weight: 600;
+    color: var(--fg);
+  }
+
+  .timeline-state[data-tone="err"] {
+    color: var(--danger);
+  }
+
+  .timeline-kind {
+    padding: 1px 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 10.5px;
+    color: var(--muted);
+  }
+
+  .timeline-counts {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .timeline-wait {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .timeline-empty {
+    margin: 0;
+    padding: 14px 4px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .timeline-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .tl-item {
+    margin: 0;
+  }
+
+  /* 方向靠左侧细条 + 标签色区分，扫视时不用读文字。 */
+  .tl-card {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 3%, var(--panel));
+    overflow: hidden;
+  }
+
+  .tl-card[data-type="out"] {
+    border-left-color: var(--primary);
+  }
+
+  .tl-card[data-type="in"] {
+    border-left-color: var(--success);
+  }
+
+  .tl-card[data-type="error"] {
+    border-left-color: var(--danger);
+  }
+
+  .tl-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* 标签/序号/耗时都是单行短内容：禁止被长正文挤窄，否则中文标签会竖排成「状/态」。 */
+  .tl-tag {
+    flex: none;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+  }
+
+  .tl-tag[data-type="in"] {
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+  }
+
+  .tl-tag[data-type="status"] {
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+  }
+
+  .tl-tag[data-type="error"] {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+  }
+
+  .tl-seq {
+    flex: none;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--fg);
+  }
+
+  .tl-time {
+    flex: none;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 终态收尾行：成功只是一行灰字，失败才给整块底色，视觉上和"消息"区分开。 */
+  .tl-final {
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 2%, var(--panel));
+  }
+
+  .tl-final[data-ok="false"] {
+    border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+    border-left: 3px solid var(--danger);
+    padding-left: 8px;
+    background: color-mix(in srgb, var(--danger) 6%, var(--panel));
+  }
+
+  .tl-final-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .tl-final-code {
+    flex: none;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--success);
+  }
+
+  .tl-final[data-ok="false"] .tl-final-code {
+    color: var(--danger);
+  }
+
+  /* 错误原因经常是一整句（transport / desc=…）：独占一行、可换行、超高时内部滚动。 */
+  .tl-final-msg {
+    margin: 6px 0 0;
+    max-height: 180px;
+    overflow: auto;
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 11.2px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .tl-code {
+    margin: 0;
+    padding: 10px 12px;
+    overflow: auto;
+    max-height: 320px;
+    font-family: var(--font-mono);
+    font-size: 11.8px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .tl-code.is-plain {
+    color: var(--fg);
+  }
+
+  .tl-note {
+    padding: 2px 0;
+    color: var(--muted);
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    text-align: center;
+    text-transform: uppercase;
+  }
+
+  @media (max-width: 620px) {
+    .timeline {
+      padding: 10px 10px 14px;
+    }
+
+    .timeline-head {
+      margin: -10px -10px 0;
+      padding: 8px 10px;
+    }
+
+    .timeline-kind {
+      display: none;
+    }
+  }
+
   .grow {
     flex: 1;
   }

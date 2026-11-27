@@ -4,6 +4,9 @@
    *
    * 拆出来单独占满整行：方法、目标、proto 文件这些"接口信息"不应该被右侧响应栏挤窄。
    * 下面的消息 / 元数据编辑器和响应体做左右分栏。
+   *
+   * proto 文件只在「Proto 文件」模式下出现：没有文件时是一整块可点击 / 可拖入的虚线投放区，
+   * 有文件时文件变成胶囊标签，导入入口收成标签行末尾的虚线小按钮，不再单独占一行。
    */
   import * as host from "../lib/host.js";
   import SelectMenu from "./SelectMenu.svelte";
@@ -13,10 +16,15 @@
     PROTO_TOTAL_LIMIT,
     byteLength,
     formatBytes,
+    protoDependents,
+    protoImportGaps,
   } from "../lib/model.js";
   import {
     addGrpcProtoFiles,
     cancelCurrentRequest,
+    closeGrpcStream,
+    connectGrpc,
+    finishGrpcStream,
     discoverGrpc,
     invokeGrpc,
     loadGrpcMethods,
@@ -28,7 +36,15 @@
     showToast,
   } from "../lib/store.js";
 
-  let { t, grpc, sending = false, discovering = false, canceling = false } = $props();
+  let {
+    t,
+    grpc,
+    stream = null,
+    sending = false,
+    discovering = false,
+    canceling = false,
+    onconfirmremove = null,
+  } = $props();
 
   /** 隐藏的文件选择器，宿主没有 fileTransfer 时的降级路径。 */
   let fileInput = $state(null);
@@ -36,24 +52,73 @@
   let dragActive = $state(false);
 
   const fileMode = $derived(grpc.schemaMode === "file");
+  /**
+   * 客户端流与双向流可以逐条发送：顶部按钮变成「连接 / 终止」，
+   * 一元与服务端流保持原来的「调用」。
+   */
+  const methodInfo = $derived(grpc.methods.find((item) => item.name === grpc.method) || null);
+  /** 需要建会话的方法：服务端流、客户端流、双向流。一元仍然是一次性调用。 */
+  const sessionMethod = $derived(Boolean(methodInfo?.serverStreaming || methodInfo?.clientStreaming));
+  /** 可以逐条发送的方法：只有客户端流与双向流。 */
+  const interactive = $derived(Boolean(methodInfo?.clientStreaming));
+  const serverOnly = $derived(Boolean(methodInfo?.serverStreaming && !methodInfo?.clientStreaming));
+  const streamActive = $derived(
+    Boolean(stream?.id) && ["connecting", "open", "halfClosed"].includes(stream.state),
+  );
+  const canFinish = $derived(stream?.state === "open" && !stream?.busy && !sending);
+
+  /** 服务端流点完「发送」会持续接收；一元不会，所以只有它需要这句说明。 */
   const protoFiles = $derived(Array.isArray(grpc.protoFiles) ? grpc.protoFiles : []);
   const protoBytes = $derived(protoFiles.reduce((total, file) => total + byteLength(file.content), 0));
+
+  /**
+   * 少导入一个被 import 的文件，整批就编译不过。后端会报第一个失败的文件，
+   * 但光看报错很容易误以为是那个文件坏了，所以这里直接把缺失的文件和依赖它的文件列出来。
+   */
+  const importGaps = $derived(protoImportGaps(protoFiles));
+  const missingHints = $derived.by(() =>
+    [...importGaps.missing].map(([name, dependents]) =>
+      t("protoMissingImport", { name, files: dependents.join(t("listSeparator")) }),
+    ),
+  );
 
   const serviceItems = $derived.by(() => {
     // 文件模式下还没导入文件时不要展示旧的 service：它来自上一次的 proto，已经无法解析。
     if (fileMode && !protoFiles.length) return [];
     const services = [...grpc.services];
     if (grpc.service && !services.includes(grpc.service)) services.unshift(grpc.service);
-    if (!services.length) return [{ value: "", label: t("chooseService"), disabled: true }];
+    // 文件模式下按钮叫「解析文件」，占位文案也跟着换，别让用户去找「发现服务」。
+    if (!services.length) return [{ value: "", label: t(fileMode ? "parseFirst" : "chooseService"), disabled: true }];
     return services.map((name) => ({ value: name, label: name }));
   });
 
+  /** 方法类型标签：一元 / 服务端流 / 客户端流 / 双向流。 */
+  function kindLabel(info) {
+    if (!info) return "";
+    if (info.clientStreaming) return t(info.serverStreaming ? "bidiStreaming" : "clientStreaming");
+    return t(info.serverStreaming ? "serverStreaming" : "unaryShort");
+  }
+
+  /** 标签配色复用侧栏 GET / GRPC 那套 token，四类方法各有颜色。 */
+  function kindTone(info) {
+    if (!info) return "other";
+    if (info.clientStreaming) return info.serverStreaming ? "post" : "put";
+    return info.serverStreaming ? "head" : "other";
+  }
+
   const methodItems = $derived.by(() => {
     if (fileMode && !protoFiles.length) return [];
+    const byName = new Map(grpc.methods.map((method) => [method.name, method]));
     let names = grpc.methods.map((method) => method.name);
     if (grpc.method && !names.includes(grpc.method)) names = [grpc.method, ...names];
-    if (!names.length) return [{ value: "", label: t("discoverFirst"), disabled: true }];
-    return names.map((name) => ({ value: name, label: name }));
+    if (!names.length) return [{ value: "", label: t(fileMode ? "parseFirstMethod" : "discoverFirst"), disabled: true }];
+    // 带类型标签：选方法时就能看出它是一元还是流式，不用先选中再读签名行。
+    return names.map((name) => ({
+      value: name,
+      label: name,
+      badge: kindLabel(byName.get(name)),
+      tone: kindTone(byName.get(name)),
+    }));
   });
 
   const signature = $derived.by(() => {
@@ -61,14 +126,7 @@
     if (!grpc.method) return "";
     const info = grpc.methods.find((method) => method.name === grpc.method);
     if (!info) return grpc.service ? `${grpc.service}/${grpc.method}` : grpc.method;
-    const kind = info.clientStreaming
-      ? info.serverStreaming
-        ? t("bidiStreaming")
-        : t("clientStreaming")
-      : info.serverStreaming
-        ? t("serverStreaming")
-        : t("unary");
-    return `${info.inputType} → ${info.outputType} · ${kind}`;
+    return `${info.inputType} → ${info.outputType}`;
   });
 
   function onTargetInput(value) {
@@ -204,7 +262,23 @@
     return () => off?.();
   });
 
+  /**
+   * 删除一个已导入的文件。
+   *
+   * 被别的文件 import 时先交由父组件确认：删掉这类文件会让整批编译失败，
+   * 属于"看不出后果的操作"，不该点一下就生效。
+   */
   function onRemoveProtoFile(name) {
+    const dependents = protoDependents(protoFiles, name);
+    if (dependents.length && onconfirmremove) {
+      onconfirmremove(name, dependents);
+      return;
+    }
+    dropProtoFile(name);
+  }
+
+  /** 真正执行删除：清掉文件并重新解析剩下的组合。 */
+  function dropProtoFile(name) {
     const remaining = protoFiles.filter((file) => file.name !== name).length;
     removeGrpcProtoFile(name);
     // 还剩文件时立刻重新解析，避免下拉框停留在被删文件的服务上。
@@ -252,11 +326,49 @@
         {canceling ? t("stopping") : t("stop")}
       </button>
     {:else}
-      <button class="btn btn-secondary" type="button" disabled={sending} onclick={() => void discoverGrpc()}>
+      <button
+        class="btn btn-secondary"
+        type="button"
+        disabled={sending || (fileMode && !protoFiles.length)}
+        onclick={() => void discoverGrpc()}
+      >
         {fileMode ? t("parseProto") : t("discover")}
       </button>
     {/if}
-    {#if sending}
+    {#if sessionMethod}
+      {#if streamActive}
+        <!-- 连接状态只在右侧响应区头部显示一处，这里只留操作按钮，避免同一个"已连接"出现好几次。 -->
+        {#if interactive}
+          <button
+            class="btn btn-secondary"
+            type="button"
+            title={t("finishSendingHint")}
+            disabled={!canFinish}
+            onclick={() => void finishGrpcStream()}
+          >
+            {stream?.state === "halfClosed" ? t("finishedSending") : t("finishSending")}
+          </button>
+        {/if}
+        <button
+          class="btn btn-ghost btn-sm stream-stop"
+          type="button"
+          title={t("stopStreamHint")}
+          disabled={stream?.busy === "close"}
+          onclick={() => void closeGrpcStream()}
+        >
+          {t("stopStream")}
+        </button>
+      {:else}
+        <button
+          class="btn btn-primary"
+          type="button"
+          disabled={sending || discovering || stream?.busy === "close"}
+          onclick={() => void connectGrpc()}
+        >
+          {serverOnly ? t("send") : t("connect")}
+        </button>
+      {/if}
+    {:else if sending}
       <button
         class="btn btn-danger"
         type="button"
@@ -268,7 +380,7 @@
       </button>
     {:else}
       <button class="btn btn-primary" type="button" disabled={discovering} onclick={() => void invokeGrpc()}>
-        {t("invoke")}
+        {t("send")}
       </button>
     {/if}
   </div>
@@ -293,36 +405,74 @@
         onclick={() => setGrpcSchemaMode("file")}>{t("schemaFile")}</button
       >
     </div>
-    <span class="grow"></span>
-    <button
-      class="btn btn-secondary btn-sm"
-      type="button"
-      title={t("protoFilesHint")}
-      disabled={sending || discovering}
-      onclick={() => void onImportProto()}
-    >
-      <span class="plus" aria-hidden="true">+</span>{t("importProto")}
-    </button>
   </div>
 
-  {#if fileMode && protoFiles.length}
-    <div class="proto-files">
-      {#each protoFiles as file (file.name)}
-        <span class="proto-chip" title={file.name}>
-          <span class="proto-chip-name">{file.name}</span>
-          <button
-            class="proto-chip-remove"
-            type="button"
-            aria-label={t("removeProtoFile", { name: file.name })}
-            title={t("removeProtoFile", { name: file.name })}
-            onclick={() => onRemoveProtoFile(file.name)}>×</button
-          >
+  {#if fileMode}
+    {#if protoFiles.length}
+      <div class="proto-files">
+        {#each protoFiles as file (file.name)}
+          <span class="proto-chip" class:is-broken={importGaps.broken.has(file.name)} title={file.name}>
+            <span class="proto-chip-name">{file.name}</span>
+            <button
+              class="proto-chip-remove"
+              type="button"
+              aria-label={t("removeProtoFile", { name: file.name })}
+              title={t("removeProtoFile", { name: file.name })}
+              onclick={() => onRemoveProtoFile(file.name)}
+            >
+              <svg viewBox="0 0 9 9" width="9" height="9" fill="none" aria-hidden="true"
+                ><path d="M2 2l5 5M7 2l-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg
+              >
+            </button>
+          </span>
+        {/each}
+        <button
+          class="proto-add"
+          type="button"
+          title={t("protoFilesHint")}
+          disabled={sending || discovering}
+          onclick={() => void onImportProto()}
+        >
+          <span class="plus" aria-hidden="true">+</span>{t("importProto")}
+        </button>
+        <span class="proto-total">{t("protoFileCount", { count: protoFiles.length, size: formatBytes(protoBytes) })}</span>
+      </div>
+      {#if missingHints.length}
+        <div class="proto-missing" role="status">
+          {#each missingHints as hint (hint)}<span>{hint}</span>{/each}
+        </div>
+      {/if}
+    {:else}
+      <button
+        class="proto-drop"
+        type="button"
+        title={t("protoFilesHint")}
+        disabled={sending || discovering}
+        onclick={() => void onImportProto()}
+      >
+        <span class="proto-drop-icon" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <path
+              d="M8 10.4V3.4m0 0L5.4 6M8 3.4l2.6 2.6"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
+              d="M3 10.2v1.4c0 .8.6 1.4 1.4 1.4h7.2c.8 0 1.4-.6 1.4-1.4v-1.4"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+            />
+          </svg>
         </span>
-      {/each}
-      <span class="proto-total">{t("protoFileCount", { count: protoFiles.length, size: formatBytes(protoBytes) })}</span>
-    </div>
-  {:else if fileMode}
-    <p class="hint proto-hint">{t("protoFilesHint")}</p>
+        <span class="proto-drop-copy">
+          <span class="proto-drop-title">{t("protoDropTitle")}</span>
+          <span class="proto-drop-sub">{t("protoDropHint")}</span>
+        </span>
+      </button>
+    {/if}
   {/if}
 
   <div class="grpc-selects">
@@ -355,6 +505,7 @@
 
   <div class="grpc-signature">{signature}</div>
 
+
   <input
     class="visually-hidden"
     type="file"
@@ -368,14 +519,18 @@
 </div>
 
 <style>
+  .stream-stop {
+    color: var(--muted);
+  }
+
+  .stream-stop:hover:not(:disabled) {
+    color: var(--danger, #c0442f);
+  }
+
   .grpc-head.is-dragging {
     outline: 2px dashed var(--primary);
     outline-offset: -4px;
     border-radius: 8px;
-  }
-
-  .grow {
-    flex: 1;
   }
 
   .plus {

@@ -926,12 +926,18 @@ textarea {
   cursor: pointer;
 }
 
+/*
+ * 图标按钮：内容统一用内联 SVG，定宽高 + flex 居中。
+ * 用字符（×、+）会因为字体 ascent/descent 不对称而偏离几何中心。
+ */
 .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 20px;
   height: 20px;
+  padding: 0;
   border-radius: 5px;
-  font-size: 16px;
-  line-height: 1;
 }
 
 .icon-btn:hover,
@@ -1009,6 +1015,17 @@ textarea {
   white-space: nowrap;
 }
 
+.select-trigger > .select-badge {
+  overflow: visible;
+  text-overflow: clip;
+}
+
+/* 触发器里类型标签在左、方法名紧跟其后，不要被 space-between 推到右侧。 */
+.select-trigger .select-value {
+  flex: 1;
+  text-align: left;
+}
+
 .select-trigger .chevron {
   width: 12px;
   height: 12px;
@@ -1039,7 +1056,9 @@ textarea {
 }
 
 .select-option {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   border: 0;
   border-radius: 5px;
@@ -1072,6 +1091,46 @@ textarea {
 
 .select-option:disabled:hover {
   background: transparent;
+}
+
+/* 方法类型标签：和侧栏的 GET / GRPC 标签同一套配色与字号。 */
+.select-option-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.select-badge {
+  flex: none;
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: var(--tag-other-bg);
+  color: var(--tag-other);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.select-badge[data-tone="head"] {
+  background: var(--tag-head-bg);
+  color: var(--tag-head);
+}
+
+.select-badge[data-tone="put"] {
+  background: var(--tag-put-bg);
+  color: var(--tag-put);
+}
+
+.select-badge[data-tone="post"] {
+  background: var(--tag-post-bg);
+  color: var(--tag-post);
+}
+
+.select-badge--trigger {
+  margin-right: 2px;
 }
 
 .request-bar {
@@ -1294,13 +1353,16 @@ textarea {
 }
 
 .kv-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 22px;
   height: 22px;
   border: 0;
   border-radius: 5px;
+  padding: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 15px;
   cursor: pointer;
 }
 
@@ -1473,6 +1535,90 @@ textarea {
   margin-top: 8px;
 }
 
+/*
+ * 空状态整块就是导入入口：虚线边框暗示可以拖入，点击走和「导入」相同的文件选择流程。
+ * 比在描述来源行尾挂一个孤立按钮更容易被发现，也不占额外一行。
+ */
+.proto-drop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 8px;
+  border: 1px dashed color-mix(in srgb, var(--fg) 22%, transparent);
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--fg) 2%, transparent);
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.proto-drop:hover {
+  border-color: color-mix(in srgb, var(--primary) 55%, transparent);
+  background: color-mix(in srgb, var(--primary) 5%, transparent);
+}
+
+.proto-drop:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.proto-drop-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
+}
+
+.proto-drop-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.proto-drop-title {
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.proto-drop-sub {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* 已有文件时，导入入口收成标签行末尾的小虚线按钮。 */
+.proto-add {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  border: 1px dashed color-mix(in srgb, var(--fg) 22%, transparent);
+  border-radius: 999px;
+  padding: 2px 10px 2px 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.proto-add:hover {
+  border-color: color-mix(in srgb, var(--primary) 55%, transparent);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+  color: var(--primary);
+}
+
+.proto-add:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
 .proto-chip {
   display: inline-flex;
   align-items: center;
@@ -1486,6 +1632,22 @@ textarea {
   font-size: 11px;
 }
 
+/* 缺了它 import 的文件：虚线 + 警告色，配合下面那行提示说明整批暂时编译不过。 */
+.proto-chip.is-broken {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--warning) 65%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+.proto-missing {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-top: 6px;
+  color: var(--warning);
+  font-size: 11px;
+}
+
 .proto-chip-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1493,15 +1655,17 @@ textarea {
 }
 
 .proto-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 18px;
   height: 18px;
   flex: none;
   border: 0;
   border-radius: 50%;
+  padding: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1;
   cursor: pointer;
 }
 
@@ -1511,14 +1675,11 @@ textarea {
 }
 
 .proto-total {
+  margin-left: auto;
+  padding-left: 4px;
   color: var(--muted);
   font-size: 10.5px;
   white-space: nowrap;
-}
-
-.proto-hint {
-  flex: none;
-  margin-top: 6px;
 }
 
 .visually-hidden {
