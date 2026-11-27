@@ -880,7 +880,8 @@ export function applySnapshot(snapshot, settings) {
     stream: normalizeStreamOptions(grpc.stream),
   };
 
-  next.responseTab = snapshot.responseTab === "headers" ? "headers" : "body";
+  // "request" 是「实际请求」页：快照里保留，回看历史时仍停在原来那一页。
+  next.responseTab = ["headers", "request"].includes(snapshot.responseTab) ? snapshot.responseTab : "body";
   return next;
 }
 

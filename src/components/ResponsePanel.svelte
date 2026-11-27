@@ -317,6 +317,12 @@
     <button class="tab" class:is-active={responseTab === "headers"} type="button" onclick={() => setResponseTab("headers")}>
       {headersTabLabel}
     </button>
+    {#if activeProtocol !== "grpc"}
+      <!-- 顺序即阅读顺序：先看响应，再看响应头，最后才核对到底发了什么。 -->
+      <button class="tab" class:is-active={responseTab === "request"} type="button" onclick={() => setResponseTab("request")}>
+        {t("sentRequestTab")}
+      </button>
+    {/if}
     <span class="grow"></span>
     {#if showDownloadChip}
       <!-- 文件响应才给下载入口：图标和文件大小合成一个 chip，避免一个图标孤零零地
@@ -504,6 +510,53 @@
   {/if}
 {/snippet}
 
+{#snippet sentBody(sent)}
+  {@const body = sent.body}
+  {@const rawType = headerValue(sent.headers, "content-type")}
+  <!-- 只留媒体类型：multipart 的 boundary 已经在请求头里，这里再堆一遍只会撑破徽标。 -->
+  {@const mediaType = rawType.split(";")[0].trim()}
+  {#if !body || body.kind === "empty"}
+    <p class="side-empty">{t("emptyRequestBody")}</p>
+  {:else}
+    <div class="body-meta">
+      {#if mediaType}<span class="type-chip">{mediaType}</span>{/if}
+      <span class="body-size">{formatBytes(body.size)}</span>
+      {#if body.kind === "multipart"}
+        <span class="body-size">
+          {t("multipartSummary", {
+            fields: body.multipart?.fields?.length || 0,
+            files: body.multipart?.files?.length || 0,
+          })}
+        </span>
+      {/if}
+    </div>
+    {#if body.kind === "text"}
+      <pre class="code-block">{body.text || ""}</pre>
+      {#if body.truncated}
+        <p class="section-note">{t("sentBodyTruncated", { size: formatBytes(body.size) })}</p>
+      {/if}
+    {:else if body.kind === "binary"}
+      <p class="side-empty">{t("binaryRequestBody", { size: formatBytes(body.size) })}</p>
+    {:else if body.kind === "multipart"}
+      {#if body.multipart?.fields?.length}
+        {@render headerTable(body.multipart.fields)}
+      {/if}
+      {#if body.multipart?.files?.length}
+        <ul class="sent-files">
+          {#each body.multipart.files as file, index (index)}
+            <li class="sent-file">
+              <span class="type-chip">{file.contentType || t("none")}</span>
+              <span class="sent-file-part">{file.name || ""} →</span>
+              <span class="sent-file-name">{file.fileName || ""}</span>
+              <span class="body-size">{formatBytes(file.size)}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    {/if}
+  {/if}
+{/snippet}
+
 {#snippet httpResult(data, presented)}
   {#if !data}
     <div class="side-empty">{t("emptyBody")}</div>
@@ -516,6 +569,27 @@
 
     <div class="section-title">{t("responseHeaders")}</div>
     {@render headerTable(data.headers)}
+  {:else if responseTab === "request"}
+    <!-- 「实际请求」独立成页：响应那两页只放响应，核对"我到底发了什么"不必和响应混着看。 -->
+    {@const sent = data.request}
+    {#if sent}
+      <div class="section-title">{t("requestUrl")}</div>
+      <div class="request-target">
+        <span class="method-chip">{sent.method || ""}</span>
+        <!-- 长 URL 允许换行，断在任意处：这里要的是"能看全"，不是一行省略号。 -->
+        <span class="request-target-url">{sent.url || ""}</span>
+      </div>
+
+      <div class="section-title">{t("headers")}</div>
+      {@render headerTable(sent.headers)}
+      <p class="section-note">{t("sentHeadersNote")}</p>
+
+      <div class="section-title">{t("body")}</div>
+      {@render sentBody(sent)}
+    {:else}
+      <!-- 旧响应没有 request 字段：宁可不显示，也不把编辑器里的输入冒充成线上报文。 -->
+      <div class="side-empty">{t("none")}</div>
+    {/if}
   {:else}
     {#if data.bodyKind === "binary"}
       {@const file = binaryFile}
@@ -894,6 +968,108 @@
 
   .grow {
     flex: 1;
+  }
+
+  /* 说明文字：把"哪些头不显示"讲清楚，别让人以为没显示就是没发。 */
+  .section-note {
+    margin: 6px 0 2px;
+    padding: 0 2px;
+    color: var(--muted);
+    font-size: 10.5px;
+    line-height: 1.5;
+  }
+
+  /* 「实际请求」的地址块：浅底 + 方法徽标，和下面的表格拉开层级。 */
+  .request-target {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 4%, transparent);
+  }
+
+  .method-chip {
+    flex: none;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 14%, transparent);
+  }
+
+  /* 长 URL 允许在任意处换行：这里要"能看全"，不是一行省略号。 */
+  .request-target-url {
+    flex: 1;
+    min-width: 0;
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+
+  .body-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 8px;
+  }
+
+  .type-chip {
+    padding: 1px 7px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+
+  .body-size {
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* multipart 的文件清单：一行一个文件，字段名 → 文件名 → 大小。 */
+  .sent-files {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .sent-file {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+
+  .sent-file-part {
+    flex: none;
+    color: var(--muted);
+  }
+
+  .sent-file-name {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   /* 下载入口：图标和文件大小合成一个 chip，和 tab 行共用一套圆角与边框。 */

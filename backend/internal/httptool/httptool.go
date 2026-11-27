@@ -13,6 +13,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -83,6 +84,8 @@ type bodyPlan struct {
 	contentType string
 	length      int64
 	open        func() (io.ReadCloser, error)
+	// sent 是给界面看的正文摘要（含截断后的正文），在组装正文时一起算好。
+	sent *SentBody
 }
 
 type multiReadCloser struct {
@@ -106,11 +109,57 @@ type Redirect struct {
 	URL    string `json:"url"`
 }
 
+// SentRequest 是这次真正发出去的那份请求，用来回答"我到底发了什么"。
+//
+// 只覆盖我们能确定的层：用户填的，加上插件补的 User-Agent、Content-Type、
+// Host、Content-Length。Transport 在内部克隆请求之后才追加的 Accept-Encoding、
+// Connection 以及 HTTP/2 伪头不在这里——前端会明确说明范围，不编造值。
+type SentRequest struct {
+	Method        string            `json:"method"`
+	URL           string            `json:"url"`
+	HTTPVersion   string            `json:"httpVersion"`
+	Headers       []values.KeyValue `json:"headers"`
+	ContentLength int64             `json:"contentLength"`
+	Body          *SentBody         `json:"body,omitempty"`
+}
+
+// maxEchoBodyBytes 是回显请求正文的上限。
+//
+// 这个值要跟着响应穿过 JSON-RPC 再进界面，几 MB 的正文会把整条链路拖慢；
+// 超出的部分只标记 truncated，真实字节仍然完整发出去了。
+const maxEchoBodyBytes = 64 * 1024
+
+// SentBody 描述实际写进连接的请求体。
+//
+// Kind 的取值与响应侧保持一致（empty/text/binary），multipart 单独一类：
+// 文件和字段只给摘要，绝不回显文件内容。
+type SentBody struct {
+	Kind      string         `json:"kind"`
+	Size      int64          `json:"size"`
+	Text      string         `json:"text,omitempty"`
+	Truncated bool           `json:"truncated,omitempty"`
+	Multipart *SentMultipart `json:"multipart,omitempty"`
+}
+
+// SentMultipart 是 multipart 请求体的摘要：字段只给数量，文件给名字和大小。
+type SentMultipart struct {
+	Fields []values.KeyValue   `json:"fields"`
+	Files  []SentMultipartFile `json:"files"`
+}
+
+type SentMultipartFile struct {
+	Name        string `json:"name"`
+	FileName    string `json:"fileName"`
+	ContentType string `json:"contentType"`
+	Size        int64  `json:"size"`
+}
+
 type SendResult struct {
 	Status      int               `json:"status"`
 	StatusText  string            `json:"statusText"`
 	HTTPVersion string            `json:"httpVersion"`
 	URL         string            `json:"url"`
+	Request     *SentRequest      `json:"request,omitempty"`
 	Headers     []values.KeyValue `json:"headers"`
 	BodyKind    string            `json:"bodyKind"`
 	BodyText    string            `json:"bodyText,omitempty"`
@@ -256,6 +305,10 @@ func SendWithUploads(ctx context.Context, params SendParams, uploads UploadResol
 	}
 
 	started := time.Now()
+	// 在 client.Do 之前抓：此时头已经补全（User-Agent、真实 boundary 的
+	// Content-Type、覆盖的 Host），重定向后 request 会被复制，抓晚了只会拿到第一跳。
+	sent := sentRequest(request)
+	sent.Body = body.sent
 	response, err := client.Do(request)
 	if err != nil {
 		if failure := contextFailure(ctx); failure != nil {
@@ -280,11 +333,14 @@ func SendWithUploads(ctx context.Context, params SendParams, uploads UploadResol
 
 	contentType := response.Header.Get("Content-Type")
 	bodyKind := classifyBody(data, contentType)
+	// 协商结果只有响应说得准：HTTP/2 下 request.Proto 仍是 HTTP/1.1。
+	sent.HTTPVersion = response.Proto
 	result := &SendResult{
 		Status:      response.StatusCode,
 		StatusText:  statusText(response),
 		HTTPVersion: response.Proto,
 		URL:         response.Request.URL.String(),
+		Request:     sent,
 		Headers:     headerEntries(response.Header),
 		BodyKind:    bodyKind,
 		ContentType: contentType,
@@ -372,12 +428,55 @@ func requestBody(params SendParams, uploads UploadResolver) (*bodyPlan, *apperr.
 	if len(body) > maxRequestBodyBytes {
 		return nil, apperr.Invalid(fmt.Sprintf("Request body is larger than %d bytes", maxRequestBodyBytes))
 	}
+	sent := &SentBody{Size: int64(len(body))}
+	switch {
+	case len(body) == 0:
+		sent.Kind = "empty"
+	case encoding == "base64":
+		// 用户显式选了 base64，正文当二进制处理，界面给大小就够。
+		sent.Kind = "binary"
+	default:
+		sent.Kind = "text"
+		sent.Text, sent.Truncated = echoBodyText(body)
+	}
 	return &bodyPlan{
 		length: int64(len(body)),
+		sent:   sent,
 		open: func() (io.ReadCloser, error) {
 			return io.NopCloser(bytes.NewReader(body)), nil
 		},
 	}, nil
+}
+
+// echoBodyText 截出可安全展示的正文前缀。
+//
+// 按 rune 边界回退，避免把一个多字节字符截成半个导致 JSON 里出现乱码。
+func echoBodyText(body []byte) (string, bool) {
+	if len(body) <= maxEchoBodyBytes {
+		return string(body), false
+	}
+	cut := maxEchoBodyBytes
+	for cut > 0 && !utf8.RuneStart(body[cut]) {
+		cut--
+	}
+	return string(body[:cut]), true
+}
+
+// maxEchoFieldValueBytes 是单个 multipart 字段回显的上限。
+//
+// 字段值通常很短，但用户可能把整段 JSON 塞进字段里；逐字段截断比整段砍掉
+// 更有用，至少还能看到字段名和前一小段内容。
+const maxEchoFieldValueBytes = 1024
+
+func echoFieldValue(value string) string {
+	if len(value) <= maxEchoFieldValueBytes {
+		return value
+	}
+	cut := maxEchoFieldValueBytes
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + "…"
 }
 
 // multipart 的规模限制。文件内容走暂存文件、流式发送，所以这里可以比内联
@@ -427,6 +526,10 @@ func buildMultipartBody(multipartBody *MultipartBody, uploads UploadResolver) (*
 	boundary := multipart.NewWriter(io.Discard).Boundary()
 	parts := make([]multipartPart, 0, len(multipartBody.Fields)+len(multipartBody.Files))
 	total := int64(0)
+	summary := &SentMultipart{
+		Fields: make([]values.KeyValue, 0, len(multipartBody.Fields)),
+		Files:  make([]SentMultipartFile, 0, len(multipartBody.Files)),
+	}
 
 	for _, field := range multipartBody.Fields {
 		name, nameError := multipartPartName(field.Name)
@@ -437,6 +540,7 @@ func buildMultipartBody(multipartBody *MultipartBody, uploads UploadResolver) (*
 		data := []byte(field.Value)
 		parts = append(parts, multipartPart{disposition: disposition, data: data})
 		total += int64(len(multipartPartHeader(boundary, disposition, "")) + len(data) + 2)
+		summary.Fields = append(summary.Fields, values.KeyValue{Name: name, Value: echoFieldValue(field.Value)})
 	}
 
 	for _, file := range multipartBody.Files {
@@ -489,6 +593,12 @@ func buildMultipartBody(multipartBody *MultipartBody, uploads UploadResolver) (*
 		}
 		parts = append(parts, part)
 		total += int64(len(multipartPartHeader(boundary, disposition, contentType))) + part.size + 2
+		summary.Files = append(summary.Files, SentMultipartFile{
+			Name:        name,
+			FileName:    fileName,
+			ContentType: contentType,
+			Size:        part.size,
+		})
 	}
 
 	closing := []byte("--" + boundary + "--\r\n")
@@ -500,6 +610,8 @@ func buildMultipartBody(multipartBody *MultipartBody, uploads UploadResolver) (*
 	plan := &bodyPlan{
 		contentType: "multipart/form-data; boundary=" + boundary,
 		length:      total,
+		// 只给字段/文件摘要：文件内容可能几百 MB，界面上只需要"发了哪些东西"。
+		sent: &SentBody{Kind: "multipart", Size: total, Multipart: summary},
 	}
 	plan.open = func() (io.ReadCloser, error) {
 		readers := make([]io.Reader, 0, len(parts)*3+1)
@@ -589,6 +701,31 @@ func headerEntries(header http.Header) []values.KeyValue {
 		}
 	}
 	return entries
+}
+
+// sentRequest 把待发出的请求整理成界面可展示的条目。
+//
+// Host 和 Content-Length 不在 request.Header 里（分别放在 request.Host 和
+// request.ContentLength），但在线上报文里一定有，所以显式补成条目——顺序也按
+// 报文习惯把 Host 放第一行，其余按名字排序。
+func sentRequest(request *http.Request) *SentRequest {
+	host := request.Host
+	if host == "" {
+		host = request.URL.Host
+	}
+	entries := headerEntries(request.Header)
+	if request.ContentLength > 0 {
+		entries = append(entries, values.KeyValue{
+			Name:  "Content-Length",
+			Value: strconv.FormatInt(request.ContentLength, 10),
+		})
+	}
+	return &SentRequest{
+		Method:        request.Method,
+		URL:           request.URL.String(),
+		Headers:       append([]values.KeyValue{{Name: "Host", Value: host}}, entries...),
+		ContentLength: request.ContentLength,
+	}
 }
 
 func classifyBody(data []byte, contentType string) string {

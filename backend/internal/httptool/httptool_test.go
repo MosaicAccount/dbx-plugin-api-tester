@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jlian/dbx-plugin-api-tester/internal/apperr"
 	"github.com/jlian/dbx-plugin-api-tester/internal/uploads"
@@ -305,6 +306,148 @@ func TestSendHTTPMultipartBody(t *testing.T) {
 	}
 	if result.BodyText != "hello|note.txt|"+fileContent {
 		t.Fatalf("unexpected echo: %q", result.BodyText)
+	}
+}
+
+// 请求头回显：用户填的、插件补的都要能看到，Host/Content-Length 不在
+// request.Header 里，必须单独补成条目，否则界面上会漏掉线上真实存在的头。
+func TestSendHTTPEchoesSentRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	result, pluginError := Send(context.Background(), SendParams{
+		Method:       "POST",
+		URL:          server.URL + "/path?q=1",
+		Headers:      []values.KeyValue{{Name: "X-Custom", Value: "abc"}},
+		BodyText:     `{"hello":"world"}`,
+		BodyEncoding: "text",
+	})
+	if pluginError != nil {
+		t.Fatalf("unexpected error: %v", pluginError)
+	}
+	sent := result.Request
+	if sent == nil {
+		t.Fatal("sent request is missing")
+	}
+	if sent.Method != "POST" || sent.URL != server.URL+"/path?q=1" {
+		t.Fatalf("unexpected request line: %s %s", sent.Method, sent.URL)
+	}
+	if sent.HTTPVersion != "HTTP/1.1" {
+		t.Fatalf("unexpected http version: %q", sent.HTTPVersion)
+	}
+	if !hasHeader(sent.Headers, "Host", strings.TrimPrefix(server.URL, "http://")) {
+		t.Fatalf("missing host header: %v", sent.Headers)
+	}
+	if !hasHeader(sent.Headers, "X-Custom", "abc") {
+		t.Fatalf("missing custom header: %v", sent.Headers)
+	}
+	if !hasHeader(sent.Headers, "User-Agent", "DBX-API-Tester/"+Version()) {
+		t.Fatalf("missing auto user-agent: %v", sent.Headers)
+	}
+	if !hasHeader(sent.Headers, "Content-Length", "17") || sent.ContentLength != 17 {
+		t.Fatalf("unexpected content length: %d %v", sent.ContentLength, sent.Headers)
+	}
+	// 展示顺序按报文习惯：Host 在第一行。
+	if len(sent.Headers) == 0 || sent.Headers[0].Name != "Host" {
+		t.Fatalf("host must be the first entry: %v", sent.Headers)
+	}
+	if sent.Body == nil || sent.Body.Kind != "text" || sent.Body.Size != 17 {
+		t.Fatalf("unexpected body summary: %+v", sent.Body)
+	}
+	if sent.Body.Text != `{"hello":"world"}` || sent.Body.Truncated {
+		t.Fatalf("unexpected body echo: %q truncated=%v", sent.Body.Text, sent.Body.Truncated)
+	}
+}
+
+// 正文回显有上限：真实字节照常发完，界面只截一段，且不能把多字节字符切成半个。
+func TestSendHTTPTruncatesEchoedBodyAtRuneBoundary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		_, _ = writer.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	// 让第 maxEchoBodyBytes 个字节落在一个三字节字符中间。
+	body := strings.Repeat("a", maxEchoBodyBytes-1) + "中文"
+	result, pluginError := Send(context.Background(), SendParams{
+		Method:       "POST",
+		URL:          server.URL,
+		BodyText:     body,
+		BodyEncoding: "text",
+	})
+	if pluginError != nil {
+		t.Fatalf("unexpected error: %v", pluginError)
+	}
+	sentBody := result.Request.Body
+	if sentBody == nil || !sentBody.Truncated {
+		t.Fatalf("body should be marked truncated: %+v", sentBody)
+	}
+	if sentBody.Size != int64(len(body)) {
+		t.Fatalf("size must reflect the wire body: %d != %d", sentBody.Size, len(body))
+	}
+	if !utf8.ValidString(sentBody.Text) {
+		t.Fatalf("echoed body must stay valid utf-8")
+	}
+	if len(sentBody.Text) > maxEchoBodyBytes {
+		t.Fatalf("echoed body exceeds the limit: %d", len(sentBody.Text))
+	}
+}
+
+// multipart 的 Content-Type 带随机 boundary：用户填的值被覆盖，回显必须是覆盖后的。
+func TestSendHTTPEchoesMultipartContentType(t *testing.T) {
+	var wireContentType string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		wireContentType = request.Header.Get("Content-Type")
+		_, _ = writer.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	result, pluginError := Send(context.Background(), SendParams{
+		Method:       "POST",
+		URL:          server.URL,
+		BodyEncoding: "multipart",
+		Headers:      []values.KeyValue{{Name: "Content-Type", Value: "text/plain"}},
+		Multipart: &MultipartBody{
+			Fields: []values.KeyValue{{Name: "title", Value: "hello"}},
+			Files: []MultipartFile{{
+				Name:        "upload",
+				FileName:    "note.txt",
+				ContentType: "text/plain",
+				Base64:      base64.StdEncoding.EncodeToString([]byte("hello multipart file")),
+			}},
+		},
+	})
+	if pluginError != nil {
+		t.Fatalf("unexpected error: %v", pluginError)
+	}
+	if result.Request == nil || !hasHeader(result.Request.Headers, "Content-Type", wireContentType) {
+		t.Fatalf("echoed content type does not match wire: %v", result.Request)
+	}
+	if !strings.HasPrefix(wireContentType, "multipart/form-data; boundary=") {
+		t.Fatalf("unexpected wire content type: %q", wireContentType)
+	}
+	// multipart 只给摘要：字段值 + 文件元数据，不读文件内容。
+	multipartBody := result.Request.Body
+	if multipartBody == nil || multipartBody.Kind != "multipart" || multipartBody.Multipart == nil {
+		t.Fatalf("unexpected body summary: %+v", multipartBody)
+	}
+	if !hasHeader(multipartBody.Multipart.Fields, "title", "hello") {
+		t.Fatalf("missing echoed field: %v", multipartBody.Multipart.Fields)
+	}
+	if len(multipartBody.Multipart.Files) != 1 {
+		t.Fatalf("unexpected files: %v", multipartBody.Multipart.Files)
+	}
+	file := multipartBody.Multipart.Files[0]
+	if file.Name != "upload" || file.FileName != "note.txt" || file.ContentType != "text/plain" {
+		t.Fatalf("unexpected file summary: %+v", file)
+	}
+	if file.Size != int64(len("hello multipart file")) {
+		t.Fatalf("unexpected file size: %d", file.Size)
+	}
+	if multipartBody.Size <= 0 || multipartBody.Size != result.Request.ContentLength {
+		t.Fatalf("multipart size must equal content length: %d vs %d", multipartBody.Size, result.Request.ContentLength)
 	}
 }
 

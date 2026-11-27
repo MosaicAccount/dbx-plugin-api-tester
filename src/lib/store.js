@@ -788,7 +788,8 @@ export function appendKVOnEnter(scope, listName, index) {
 }
 
 export function setResponseTab(tab) {
-  update((s) => ({ ...s, responseTab: tab === "headers" ? "headers" : "body" }));
+  const next = tab === "headers" || tab === "request" ? tab : "body";
+  update((s) => ({ ...s, responseTab: next }));
   scheduleDraftPersist();
 }
 
