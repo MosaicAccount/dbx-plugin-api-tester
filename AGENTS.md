@@ -199,6 +199,10 @@ dbx-plugin package .
   （如 `chore(automation): register owner/repo for auto-update`）。
 - **正文**：中文，写给维护者看，固定三段「改了什么 / 用户可见影响 / 如何验证」；跨仓库 PR
   （如 `t8y2/dbx-store`）同样适用。
+- **必须关联 issue**：PR 正文用 `Closes #N` 关联这一版真正闭环的 issue（修复用 `Closes`，
+  只完成一部分用 `Refs`），多个 issue 逐行写。合并前用
+  `gh pr view <n> --json closingIssuesReferences` 确认编号都在，不要只在评论里提一句——
+  PR 合完再补，issue 侧栏出不了「Linked pull requests」，只能靠评论反查。
 - **只写结论，不写过程**：不要出现"我这边跑了…""接着我又验证了…"这类对话或工作日志口吻，也不要把
   会话里的临时输出整段贴上去。验证命令可以贴，但写在正文里的结论必须是自己复跑过的。
 - **数字必须对得上**：正文里的 `sha256`、`size`、target 数量、版本号发之前逐一核对，核不实就写核不实。
@@ -223,6 +227,8 @@ dbx-plugin package .
   说明里不要再写固定的「安装」段（下方 Assets 下载哪个平台的包、在 DBX 的「安装插件包」里
   怎么装、插件 ID 不变覆盖安装即可）和「校验」段，也不要写「未签名候选包、签名由维护者执行」
   这类流程说明：安装入口由商店页面承担，签名状态由候选 PR 体现，Release 正文只讲这次的变化。
+- **Release 说明回链 issue 与 PR**：正文末尾附「对应 issue」小节，逐条写 `#N 标题`（修复 / 实现），
+  并注明由哪个 PR 实现。这样以后看 Release 就能反查到 issue 与实现 PR，不必翻时间线。
 - **Release 资产**：复用 workflow 只上传 `.dbxp` 与 `release-candidates.json`；每包
   `.artifact.json` 由发布 workflow 之后的 `sidecars` job 自动补传
   （`scripts/backfill-release-sidecars.mjs`）。补传前会用 `release-candidates.json` 逐项核对
